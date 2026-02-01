@@ -286,22 +286,14 @@ FROM fact_deliveries d;
 -- ADVANCED ENTERPRISE LOGIC
 -- =============================================
 
--- Make South region worse (realistic pattern)
-UPDATE d
-SET DeliveryStatus = 'Late'
-FROM fact_deliveries d
-JOIN dim_region r ON d.RegionKey = r.RegionKey
-WHERE r.RegionName = 'South'
-  AND ABS(CHECKSUM(NEWID())) % 10 < 3;
-
--- Holiday season delays (Nov–Dec)
+-- Holiday Season Delays (Nov-Dec)
 UPDATE d
 SET DeliveryMinutes = DeliveryMinutes + 800
 FROM fact_deliveries d
 JOIN dim_date dt ON d.DateKey = dt.DateKey
 WHERE dt.Month IN (11, 12);
 
--- Junior drivers slower
+-- Less Experienced Drivers
 UPDATE d
 SET DeliveryMinutes = DeliveryMinutes + 300
 FROM fact_deliveries d
@@ -310,24 +302,16 @@ WHERE dr.ExperienceLevel = 'Junior';
 
 
 /*
+FACT TABLES:
 fact_deliveries
-
 fact_exceptions
-
 fact_sales
 
 DIM TABLES:
-
 dim_date
-
 dim_region
-
 dim_route
-
 dim_driver
-
 dim_shipment_type
-
 dim_product
-
 dim_exception_type */
