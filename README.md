@@ -79,30 +79,6 @@ All dimensions use **surrogate keys** for referential integrity.
 Fact tables store measurable metrics and reference dimension surrogate keys.
 
 ---
-            dim_region
-               ▲
-               │
-            fact_sales
-            fact_routes
-            fact_deliveries
-            fact_exceptions
-
-dim_driver      dim_route
-   ▲               ▲
-   │               │
-fact_routes      fact_deliveries
-
-dim_date  ────► fact_sales (DateKey)
-dim_date  ────► fact_deliveries (DeliveryDateKey, ExpectedDeliveryDateKey)
-dim_date  ────► fact_exceptions (DateReportedKey, ResolvedDateKey)
-
-dim_product_type ───► fact_sales
-dim_shipment_type ─► fact_deliveries
-dim_delivery_status ─► fact_deliveries
-dim_exception_type ─► fact_exceptions
-dim_priority_flag ─► fact_deliveries, fact_exceptions
-
----
 
 ## 🔄 ETL Process
 
@@ -145,53 +121,6 @@ dim_priority_flag ─► fact_deliveries, fact_exceptions
 
 ---
 
-## 🚀 File Structure
-
-Operational-Analytics-Data-Warehouse/
-│
-├── README.md
-│
-├── docs/
-│   ├── star_schema_diagram.png
-│   ├── architecture_overview.png
-│
-├── sql/
-│   │
-│   ├── 01_staging_tables/
-│   │   ├── create_staging_sales.sql
-│   │   ├── create_staging_routes.sql
-│   │   ├── create_staging_deliveries.sql
-│   │   ├── create_staging_exceptions.sql
-│   │
-│   ├── 02_dimension_tables/
-│   │   ├── create_dim_region.sql
-│   │   ├── create_dim_driver.sql
-│   │   ├── create_dim_route.sql
-│   │   ├── create_dim_date.sql
-│   │   ├── create_dim_product_type.sql
-│   │   ├── create_dim_shipment_type.sql
-│   │   ├── create_dim_delivery_status.sql
-│   │   ├── create_dim_exception_type.sql
-│   │   ├── create_dim_priority_flag.sql
-│   │
-│   ├── 03_fact_tables/
-│   │   ├── create_fact_sales.sql
-│   │   ├── create_fact_routes.sql
-│   │   ├── create_fact_deliveries.sql
-│   │   ├── create_fact_exceptions.sql
-│   │
-│   ├── 04_etl_scripts/
-│       ├── load_dim_tables.sql
-│       ├── load_fact_tables.sql
-│       ├── full_etl_pipeline.sql
-│
-└── sample_queries/
-    ├── sales_analysis.sql
-    ├── delivery_performance.sql
-    ├── exception_analysis.sql
-
-
---
 ## 📎 Author
 
 Dexter Boyd
