@@ -50,8 +50,8 @@ All dimensions use **surrogate keys** for referential integrity.
 | Dim Table               | Surrogate Key     | Source Columns / Notes                                      |
 | ----------------------- | ----------------- | ----------------------------------------------------------- |
 | **dim_region**          | RegionKey         | Region (from all staging tables)                            |
-| **dim_driver**          | DriverKey         | DriverID, DriverName (NULL), HireDate (NULL), Status (NULL) |
-| **dim_route**           | RouteKey          | RouteID, Region (optional if route fixed)                   |
+| **dim_driver**          | DriverKey         | DriverID, DriverName, HireDate, Status                      |
+| **dim_route**           | RouteKey          | RouteID, Region                 |
 | **dim_date**            | DateKey           | FullDate, Year, Month, Quarter, Week, DayOfWeek             |
 | **dim_product_type**    | ProductTypeKey    | ProductType (from `staging_sales`)                          |
 | **dim_shipment_type**   | ShipmentTypeKey   | ShipmentType (from `staging_deliveries`)                    |
