@@ -1,0 +1,179 @@
+{
+  "name": "FedEx Enterprise BI Theme",
+  "dataColors": [
+    "#4D148C",
+    "#FF6600",
+    "#2B2E34",
+    "#6B7280",
+    "#A855F7",
+    "#FB923C",
+    "#CBD5E1"
+  ],
+  "background": "#F4F6F9",
+  "foreground": "#1F2937",
+  "tableAccent": "#4D148C",
+
+  "textClasses": {
+    "title": {
+      "fontFace": "Segoe UI Semibold",
+      "fontSize": 20,
+      "color": "#4D148C"
+    },
+    "label": {
+      "fontFace": "Segoe UI",
+      "fontSize": 12,
+      "color": "#6B7280"
+    },
+    "callout": {
+      "fontFace": "Segoe UI Bold",
+      "fontSize": 34,
+      "color": "#111827"
+    }
+  },
+
+  "visualStyles": {
+    "*": {
+      "*": {
+        "background": [
+          {
+            "color": { "solid": { "color": "#FFFFFF" } },
+            "transparency": 0
+          }
+        ],
+        "border": [
+          {
+            "show": true,
+            "color": { "solid": { "color": "#E5E7EB" } }
+          }
+        ],
+        "title": [
+          {
+            "fontFace": "Segoe UI Semibold",
+            "fontSize": 14,
+            "color": { "solid": { "color": "#4D148C" } }
+          }
+        ],
+        "labels": [
+          {
+            "fontFace": "Segoe UI",
+            "fontSize": 12,
+            "color": { "solid": { "color": "#111827" } }
+          }
+        ]
+      }
+    },
+
+    "card": {
+      "*": {
+        "categoryLabels": [
+          {
+            "fontFace": "Segoe UI",
+            "fontSize": 12,
+            "color": { "solid": { "color": "#6B7280" } }
+          }
+        ],
+        "labels": [
+          {
+            "fontFace": "Segoe UI Bold",
+            "fontSize": 38,
+            "color": { "solid": { "color": "#111827" } }
+          }
+        ]
+      }
+    },
+
+    "lineChart": {
+      "*": {
+        "dataPoint": [
+          {
+            "defaultColor": { "solid": { "color": "#FF6600" } }
+          }
+        ],
+        "categoryAxis": [
+          {
+            "labelColor": { "solid": { "color": "#6B7280" } },
+            "fontSize": 11
+          }
+        ],
+        "valueAxis": [
+          {
+            "labelColor": { "solid": { "color": "#6B7280" } },
+            "fontSize": 11,
+            "gridlines": true
+          }
+        ]
+      }
+    },
+
+    "clusteredBarChart": {
+      "*": {
+        "dataPoint": [
+          {
+            "defaultColor": { "solid": { "color": "#4D148C" } }
+          }
+        ],
+        "labels": [
+          {
+            "color": { "solid": { "color": "#111827" } },
+            "fontSize": 12
+          }
+        ]
+      }
+    },
+
+    "stackedColumnChart": {
+      "*": {
+        "dataPoint": [
+          {
+            "defaultColor": { "solid": { "color": "#4D148C" } }
+          }
+        ]
+      }
+    },
+
+    "table": {
+      "*": {
+        "grid": [
+          {
+            "gridVertical": true,
+            "gridVerticalColor": { "solid": { "color": "#E5E7EB" } },
+            "gridHorizontal": true,
+            "gridHorizontalColor": { "solid": { "color": "#E5E7EB" } }
+          }
+        ],
+        "columnHeaders": [
+          {
+            "fontFace": "Segoe UI Semibold",
+            "fontSize": 12,
+            "color": { "solid": { "color": "#4D148C" } }
+          }
+        ],
+        "values": [
+          {
+            "fontFace": "Segoe UI",
+            "fontSize": 12,
+            "color": { "solid": { "color": "#111827" } }
+          }
+        ]
+      }
+    },
+
+    "slicer": {
+      "*": {
+        "items": [
+          {
+            "fontFace": "Segoe UI",
+            "fontSize": 11,
+            "color": { "solid": { "color": "#111827" } }
+          }
+        ],
+        "background": [
+          {
+            "color": { "solid": { "color": "#FFFFFF" } },
+            "transparency": 0
+          }
+        ]
+      }
+    }
+  }
+}
