@@ -1,6 +1,6 @@
 
 -- =========================================
---  STAGING TABLES
+--  CREATE STAGING TABLES
 -- =========================================
 
 CREATE TABLE staging_deliveries (
@@ -47,7 +47,7 @@ CREATE TABLE staging_sales (
 );
 
 -- =========================================
---  DIMENSION TABLES
+--  CREATE DIMENSION TABLES
 -- =========================================
 
 CREATE TABLE dim_date (
@@ -97,7 +97,7 @@ CREATE TABLE dim_priority_flag (
 );
 
 -- =========================================
---  FACT TABLES
+--  CREATE FACT TABLES
 -- =========================================
 
 CREATE TABLE fact_deliveries (

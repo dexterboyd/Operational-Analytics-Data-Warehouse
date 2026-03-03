@@ -1,3 +1,8 @@
+-----------------------------------------------------
+-- CREATE AND POPULATE FACT TABLES
+-- FROM SCHEMA
+-----------------------------------------------------
+
 -- Create fact_sales table
 IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'fact_sales' AND schema_id = SCHEMA_ID('dw'))
 BEGIN
