@@ -29,8 +29,29 @@ SELECT
     SalesID,
     DeliveryID,
 
+	/*
     -- Safe DateKey conversion (prevents ETL failure)
     TRY_CONVERT(INT, FORMAT(DateKey,'yyyyMMdd')) AS DateKey,
+	*/
+
+	-- DATE KEY VALIDATION
+    -- Ensure DateKey follows valid YYYYMMDD warehouse format
+    ---------------------------------------------------------
+    CASE
+        WHEN DateKey BETWEEN 19000101 AND 21001231
+            THEN DateKey
+        ELSE NULL
+    END AS DateKey,
+
+    ---------------------------------------------------------
+    -- DATA QUALITY MONITORING FLAG
+    -- Identifies invalid DateKey values for auditing
+    ---------------------------------------------------------
+    CASE
+        WHEN DateKey BETWEEN 19000101 AND 21001231
+            THEN 0
+        ELSE 1
+    END AS IsBadDateKey,
 
     -- Normalize text fields (prevents dimension duplication)
     UPPER(LTRIM(RTRIM(ProductType))) AS ProductType,
