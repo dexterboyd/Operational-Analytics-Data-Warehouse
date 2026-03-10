@@ -9,8 +9,6 @@ Features of this script:
 3. Logging: PRINT messages for every action.
 4. Cursor-driven transfers for DW dimensions, facts, and reporting views → easy to extend.
 5. Compact validation: Single table shows counts of tables and views per schema.
-6. ETL layer order maintained: Staging → Clean → DW → Reporting.
-7. Optional staging → clean validation: Row counts and NULL checks for key columns (can be enabled/disabled via flag).
 ==============================================================*/
 
 -----------------------------------------------------
