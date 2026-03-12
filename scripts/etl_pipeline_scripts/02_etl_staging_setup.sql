@@ -1,3 +1,25 @@
+﻿-----------------------------------------------------
+-- CREATE REQUIRED ETL SCHEMAS
+-- Ensures schemas used in the warehouse pipeline exist
+--
+-- Pipeline Layers:
+-- staging   → raw imported source data
+-- clean     → standardized transformation views
+-- dw        → star schema (fact & dimension tables)
+-- reporting → aggregated BI views
+-----------------------------------------------------
+
+DECLARE @Schemas TABLE (SchemaName NVARCHAR(100))
+
+INSERT INTO @Schemas
+VALUES
+('staging'),
+('clean'),
+('dw'),
+('reporting')
+
+DECLARE @SQL NVARCHAR(MAX) = ''
+
 -- =========================================
 -- CREATE STAGING SCHEMA (IF NOT EXISTS)
 -- =========================================
@@ -5,17 +27,18 @@
 -- with minimal transformation. Data types are aligned but business
 -- rules are not yet applied.
 
-IF SCHEMA_ID('staging') IS NULL
+SELECT @SQL = @SQL + '
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = ''' + SchemaName + ''')
 BEGIN
-    EXEC('CREATE SCHEMA staging');
-    PRINT 'Schema created: staging';
+    EXEC(''CREATE SCHEMA ' + SchemaName + ''')
+    PRINT ''Schema created: ' + SchemaName + '''
 END
 ELSE
-BEGIN
-    PRINT 'Schema already exists: staging';
-END
+    PRINT ''Schema already exists: ' + SchemaName + '''
+'
+FROM @Schemas
+EXEC(@SQL)
 GO
-
 
 -- =========================================
 -- STAGING TABLE: DELIVERIES
@@ -39,7 +62,6 @@ CREATE TABLE staging.staging_deliveries (
 END
 GO
 
-
 -- =========================================
 -- STAGING TABLE: DELIVERY EXCEPTIONS
 -- =========================================
@@ -61,7 +83,6 @@ CREATE TABLE staging.staging_exceptions (
 END
 GO
 
-
 -- =========================================
 -- STAGING TABLE: ROUTES
 -- =========================================
@@ -81,7 +102,6 @@ CREATE TABLE staging.staging_routes (
 );
 END
 GO
-
 
 -- =========================================
 -- STAGING TABLE: SALES
@@ -103,51 +123,109 @@ CREATE TABLE staging.staging_sales (
 END
 GO
 
-/*
--- =========================================
---  CREATE STAGING TABLES
--- =========================================
-
-CREATE TABLE staging_deliveries (
-    DeliveryID INT PRIMARY KEY,
-    RouteID NVARCHAR(10),
-    DriverID NVARCHAR(50),
-    Region NVARCHAR(10),
-    ShipmentType NVARCHAR(20),
-    DeliveryDate DATE,
-    ExpectedDeliveryDate DATE NULL,
-    DeliveryStatus NVARCHAR(20),
-    PriorityFlag BIT
+-----------------------------------------------------
+-- BULK INSERT DATA INTO STAGING TABLES
+-----------------------------------------------------
+TRUNCATE TABLE staging.staging_sales;
+BULK INSERT staging.staging_sales
+FROM 'C:\Operational-Analytics-Data-Warehouse\datasets\raw\sales.csv'
+WITH (
+    FIRSTROW = 2,
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    TABLOCK
 );
+GO
 
-CREATE TABLE staging_exceptions (
-    ExceptionID INT PRIMARY KEY,
-    DeliveryID INT,
-    ExceptionType NVARCHAR(50),
-    DateReported DATE,
-    ResolvedDate DATE NULL,
-    ResolutionTimeHours INT,
-    PriorityFlag BIT,
-    Region NVARCHAR(10)
+TRUNCATE TABLE staging.staging_deliveries;
+BULK INSERT staging.staging_deliveries
+FROM 'C:\Operational-Analytics-Data-Warehouse\datasets\raw\deliveries.csv'
+WITH (
+    FIRSTROW = 2,
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    TABLOCK
 );
+GO
 
-CREATE TABLE staging_routes (
-    RouteID NVARCHAR(10),
-    DriverID NVARCHAR(50),
-    PlannedStops INT,
-    ActualStops INT,
-    PlannedHours DECIMAL(5,2),
-    ActualHours DECIMAL(5,2),
-    Region NVARCHAR(10)
+TRUNCATE TABLE staging.staging_routes;
+BULK INSERT staging.staging_routes
+FROM 'C:\Operational-Analytics-Data-Warehouse\datasets\raw\routes.csv'
+WITH (
+    FIRSTROW = 2,
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    TABLOCK
 );
+GO
 
-CREATE TABLE staging_sales (
-    SalesID INT PRIMARY KEY,
-    DeliveryID INT,
-    DateKey DATE,
-    ProductType NVARCHAR(50),
-    Region NVARCHAR(10),
-    UnitsSold INT,
-    SalesAmount DECIMAL(10,2)
+TRUNCATE TABLE staging.staging_exceptions;
+BULK INSERT staging.staging_exceptions
+FROM 'C:\Operational-Analytics-Data-Warehouse\datasets\raw\exceptions.csv'
+WITH (
+    FIRSTROW = 2,
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '\n',
+    TABLOCK
 );
-*/
+GO
+
+PRINT 'CSV data loaded into staging tables';
+GO
+
+-----------------------------------------------------
+-- Option 2: TRANSFER RAW IMPORTED TABLES INTO STAGING
+-- Many raw imports land in dbo by default.
+-- This section moves them into the staging schema.
+-----------------------------------------------------
+-- DECLARE @Tables TABLE (TableName NVARCHAR(100))
+
+-- INSERT INTO @Tables
+-- VALUES
+-- ('staging_sales'),
+-- ('staging_deliveries'),
+-- ('staging_routes'),
+-- ('staging_exceptions')
+
+-- DECLARE @TransferSQL NVARCHAR(MAX) = ''
+
+-- SELECT @TransferSQL = @TransferSQL + '
+-- IF OBJECT_ID(''dbo.' + TableName + ''',''U'') IS NOT NULL
+-- BEGIN
+--     ALTER SCHEMA staging TRANSFER dbo.' + TableName + '
+--     PRINT ''Transferred table to staging: ' + TableName + '''
+-- END
+-- '
+-- FROM @Tables
+-- EXEC(@TransferSQL)
+-- GO
+-----------------------------------------------------
+
+-----------------------------------------------------
+-- ETL SCHEMA OBJECT SUMMARY
+-- Quick validation report showing tables & views 
+-- within each warehouse layer
+-----------------------------------------------------
+
+PRINT '--- ETL SCHEMA OBJECT SUMMARY ---'
+
+SELECT 
+    s.name AS SchemaName,
+    -- Count user tables
+    SUM(CASE WHEN o.type = 'U' THEN 1 ELSE 0 END) AS TableCount,
+    -- Count views
+    SUM(CASE WHEN o.type = 'V' THEN 1 ELSE 0 END) AS ViewCount
+FROM sys.schemas s
+LEFT JOIN sys.objects o
+    ON o.schema_id = s.schema_id
+WHERE s.name IN ('staging','clean','dw','reporting')
+GROUP BY s.name
+ORDER BY 
+    CASE s.name
+        WHEN 'staging' THEN 1
+        WHEN 'clean' THEN 2
+        WHEN 'dw' THEN 3
+        WHEN 'reporting' THEN 4
+    END
+PRINT '--- END OF SUMMARY ---'
+GO
