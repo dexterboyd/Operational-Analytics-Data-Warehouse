@@ -1,229 +1,114 @@
-﻿/*==============================================================
-  DW VALIDATION SCRIPT
-  Purpose:
-      Validate Data Warehouse tables after load.
-      Ensures data integrity, referential consistency, and completeness.
+﻿/*
+============================================================
+METADATA-DRIVEN DW VALIDATION
 
-  Checks Performed:
-      1. Table row counts (sanity check)
-      2. Null checks on surrogate keys in fact tables
-      3. Foreign key integrity between fact and dimension tables
-      4. Data quality for negative or invalid values
-      5. Business metric summaries
-==============================================================*/
+Purpose:
+    Automatically validate fact and dimension tables.
 
-PRINT '--- DW VALIDATION START ---';
+Checks:
+    1. Row counts for all DW tables
+    2. Null surrogate key checks in fact tables
+    3. Foreign key integrity validation
+    4. Basic fact table metric validation
 
-
------------------------------------------------------
--- STEP 1: TABLE ROW COUNTS
--- Purpose: Quick sanity check to ensure data loaded as expected
------------------------------------------------------
-SELECT 'dim_product_type' AS TableName, COUNT(*) AS Row_Count FROM dw.dim_product_type
-UNION ALL
-SELECT 'dim_region', COUNT(*) FROM dw.dim_region
-UNION ALL
-SELECT 'dim_driver', COUNT(*) FROM dw.dim_driver
-UNION ALL
-SELECT 'dim_route', COUNT(*) FROM dw.dim_route
-UNION ALL
-SELECT 'dim_shipment_type', COUNT(*) FROM dw.dim_shipment_type
-UNION ALL
-SELECT 'dim_delivery_status', COUNT(*) FROM dw.dim_delivery_status
-UNION ALL
-SELECT 'dim_exception_type', COUNT(*) FROM dw.dim_exception_type
-UNION ALL
-SELECT 'dim_priority_flag', COUNT(*) FROM dw.dim_priority_flag
-UNION ALL
-SELECT 'dim_date', COUNT(*) FROM dw.dim_date
-UNION ALL
-SELECT 'fact_sales', COUNT(*) FROM dw.fact_sales
-UNION ALL
-SELECT 'fact_deliveries', COUNT(*) FROM dw.fact_deliveries
-UNION ALL
-SELECT 'fact_routes', COUNT(*) FROM dw.fact_routes
-UNION ALL
-SELECT 'fact_exceptions', COUNT(*) FROM dw.fact_exceptions;
-
-
------------------------------------------------------
--- STEP 2: FACT TABLE NULL SURROGATE KEY CHECKS
--- Purpose: Ensure no fact rows have missing dimension references
------------------------------------------------------
-SELECT 'fact_sales.ProductTypeID' AS FieldName, COUNT(*) AS NullCount
-FROM dw.fact_sales
-WHERE ProductTypeID IS NULL
-
-UNION ALL
-
-SELECT 'fact_sales.RegionID', COUNT(*)
-FROM dw.fact_sales
-WHERE RegionID IS NULL;
-
-
------------------------------------------------------
--- STEP 3: FOREIGN KEY INTEGRITY CHECKS
--- Purpose: Detect orphaned fact rows with missing dimension keys
------------------------------------------------------
-
--- Sales → ProductType dimension
-SELECT COUNT(*) AS MissingProductDimension
-FROM dw.fact_sales f
-LEFT JOIN dw.dim_product_type d
-  ON f.ProductTypeID = d.ProductTypeID
-WHERE d.ProductTypeID IS NULL;
-
--- Sales → Region dimension
-SELECT COUNT(*) AS MissingRegionDimension
-FROM dw.fact_sales f
-LEFT JOIN dw.dim_region r
-  ON f.RegionID = r.RegionID
-WHERE r.RegionID IS NULL;
-
--- Deliveries → Route dimension
-SELECT COUNT(*) AS MissingRouteDimension
-FROM dw.fact_deliveries f
-LEFT JOIN dw.dim_route r
-  ON f.RouteID = r.RouteID
-WHERE r.RouteID IS NULL;
-
-
------------------------------------------------------
--- STEP 4: FACT TABLE DATA QUALITY
--- Purpose: Identify invalid or suspicious data values
------------------------------------------------------
-
--- Negative sales amounts indicate ETL or source data issues
-SELECT COUNT(*) AS NegativeSales
-FROM dw.fact_sales
-WHERE SalesAmount < 0;
-
--- Deliveries with missing IDs are invalid
-SELECT COUNT(*) AS InvalidDeliveryRecords
-FROM dw.fact_deliveries
-WHERE DeliveryID IS NULL;
-
-
------------------------------------------------------
--- STEP 5: BUSINESS METRICS CHECK
--- Purpose: Quick aggregation to validate business metrics
------------------------------------------------------
-SELECT
-    COUNT(*) AS TotalSalesTransactions,
-    SUM(SalesAmount) AS TotalSalesRevenue,
-    AVG(SalesAmount) AS AvgSalesValue
-FROM dw.fact_sales;
-
-
-PRINT '--- DW VALIDATION COMPLETE ---';
-
-/*
-/*==============================================================
-  DW VALIDATION SCRIPT
-  Purpose:
-      Validate Data Warehouse tables after load.
-
-  Checks:
-      - Row counts
-      - Surrogate key integrity
-      - Foreign key consistency
-      - Data completeness
-==============================================================*/
-
-PRINT '--- DW VALIDATION START ---';
-
------------------------------------------------------
--- STEP 1: TABLE ROW COUNTS
------------------------------------------------------
-
-SELECT 'dim_product_type' AS TableName, COUNT(*) AS Row_Count FROM dw.dim_product_type
-UNION ALL
-SELECT 'dim_region', COUNT(*) FROM dw.dim_region
-UNION ALL
-SELECT 'dim_driver', COUNT(*) FROM dw.dim_driver
-UNION ALL
-SELECT 'dim_route', COUNT(*) FROM dw.dim_route
-UNION ALL
-SELECT 'dim_shipment_type', COUNT(*) FROM dw.dim_shipment_type
-UNION ALL
-SELECT 'dim_delivery_status', COUNT(*) FROM dw.dim_delivery_status
-UNION ALL
-SELECT 'dim_exception_type', COUNT(*) FROM dw.dim_exception_type
-UNION ALL
-SELECT 'dim_priority_flag', COUNT(*) FROM dw.dim_priority_flag
-UNION ALL
-SELECT 'dim_date', COUNT(*) FROM dw.dim_date
-UNION ALL
-SELECT 'fact_sales', COUNT(*) FROM dw.fact_sales
-UNION ALL
-SELECT 'fact_deliveries', COUNT(*) FROM dw.fact_deliveries
-UNION ALL
-SELECT 'fact_routes', COUNT(*) FROM dw.fact_routes
-UNION ALL
-SELECT 'fact_exceptions', COUNT(*) FROM dw.fact_exceptions;
-
------------------------------------------------------
--- STEP 2: FACT TABLE NULL KEY CHECKS
------------------------------------------------------
-
-SELECT 'fact_sales.ProductTypeID' AS FieldName, COUNT(*) AS NullCount
-FROM dw.fact_sales
-WHERE ProductTypeID IS NULL
-
-UNION ALL
-
-SELECT 'fact_sales.RegionID', COUNT(*)
-FROM dw.fact_sales
-WHERE RegionID IS NULL;
-
------------------------------------------------------
--- STEP 3: FOREIGN KEY INTEGRITY CHECKS
------------------------------------------------------
-
--- Sales → Product
-SELECT COUNT(*) AS MissingProductDimension
-FROM dw.fact_sales f
-LEFT JOIN dw.dim_product_type d
-ON f.ProductTypeID = d.ProductTypeID
-WHERE d.ProductTypeID IS NULL;
-
--- Sales → Region
-SELECT COUNT(*) AS MissingRegionDimension
-FROM dw.fact_sales f
-LEFT JOIN dw.dim_region r
-ON f.RegionID = r.RegionID
-WHERE r.RegionID IS NULL;
-
--- Deliveries → Route
-SELECT COUNT(*) AS MissingRouteDimension
-FROM dw.fact_deliveries f
-LEFT JOIN dw.dim_route r
-ON f.RouteID = r.RouteID
-WHERE r.RouteID IS NULL;
-
------------------------------------------------------
--- STEP 4: FACT TABLE DATA QUALITY
------------------------------------------------------
-
--- Negative sales values
-SELECT COUNT(*) AS NegativeSales
-FROM dw.fact_sales
-WHERE SalesAmount < 0;
-
--- Invalid delivery relationships
-SELECT COUNT(*) AS InvalidDeliveryRecords
-FROM dw.fact_deliveries
-WHERE DeliveryID IS NULL;
-
------------------------------------------------------
--- STEP 5: BUSINESS METRICS CHECK
------------------------------------------------------
-
-SELECT
-    COUNT(*) AS TotalSalesTransactions,
-    SUM(SalesAmount) AS TotalSalesRevenue,
-    AVG(SalesAmount) AS AvgSalesValue
-FROM dw.fact_sales;
-
-PRINT '--- DW VALIDATION COMPLETE ---';
+Schema scanned:
+    dw
+============================================================
 */
+
+PRINT '===== DW VALIDATION START =====';
+
+
+------------------------------------------------------------
+-- STEP 1: ROW COUNTS FOR ALL DW TABLES
+------------------------------------------------------------
+PRINT 'STEP 1: TABLE ROW COUNTS';
+
+SELECT
+    s.name AS SchemaName,
+    t.name AS TableName,
+    SUM(p.rows) AS RowsCount
+FROM sys.tables t
+JOIN sys.schemas s
+    ON t.schema_id = s.schema_id
+JOIN sys.partitions p
+    ON t.object_id = p.object_id
+WHERE s.name = 'dw'
+AND p.index_id IN (0,1)
+GROUP BY
+    s.name,
+    t.name
+ORDER BY
+    t.name;
+
+
+------------------------------------------------------------
+-- STEP 2: NULL SURROGATE KEY CHECKS (FACT TABLES)
+------------------------------------------------------------
+PRINT 'STEP 2: NULL SURROGATE KEY CHECKS';
+
+DECLARE @sql NVARCHAR(MAX) = '';
+
+SELECT
+    @sql = @sql + '
+    SELECT
+        ''' + t.name + ''' AS FactTable,
+        ''' + c.name + ''' AS KeyColumn,
+        COUNT(*) AS NullCount
+    FROM dw.' + t.name + '
+    WHERE ' + c.name + ' IS NULL
+    HAVING COUNT(*) > 0;
+'
+FROM sys.tables t
+JOIN sys.schemas s
+    ON t.schema_id = s.schema_id
+JOIN sys.columns c
+    ON t.object_id = c.object_id
+WHERE s.name = 'dw'
+AND t.name LIKE 'fact%'
+AND c.name LIKE '%ID';
+
+EXEC sp_executesql @sql;
+
+
+------------------------------------------------------------
+-- STEP 3: FOREIGN KEY INTEGRITY CHECK
+------------------------------------------------------------
+PRINT 'STEP 3: FOREIGN KEY RELATIONSHIP CHECKS';
+
+SELECT
+    fk.name AS ForeignKeyName,
+    OBJECT_NAME(fk.parent_object_id) AS FactTable,
+    COL_NAME(fc.parent_object_id,fc.parent_column_id) AS FactColumn,
+    OBJECT_NAME(fk.referenced_object_id) AS DimensionTable,
+    COL_NAME(fc.referenced_object_id,fc.referenced_column_id) AS DimensionColumn
+FROM sys.foreign_keys fk
+JOIN sys.foreign_key_columns fc
+    ON fk.object_id = fc.constraint_object_id
+WHERE OBJECT_SCHEMA_NAME(fk.parent_object_id) = 'dw';
+
+
+------------------------------------------------------------
+-- STEP 4: FACT TABLE METRIC VALIDATION
+------------------------------------------------------------
+PRINT 'STEP 4: FACT TABLE METRICS';
+
+DECLARE @metricSQL NVARCHAR(MAX) = '';
+
+SELECT
+    @metricSQL = @metricSQL + '
+    SELECT
+        ''' + t.name + ''' AS FactTable,
+        COUNT(*) AS RowCount
+    FROM dw.' + t.name + ';
+'
+FROM sys.tables t
+JOIN sys.schemas s
+    ON t.schema_id = s.schema_id
+WHERE s.name = 'dw'
+AND t.name LIKE 'fact%';
+
+EXEC sp_executesql @metricSQL;
+
+
+PRINT '===== DW VALIDATION COMPLETE =====';

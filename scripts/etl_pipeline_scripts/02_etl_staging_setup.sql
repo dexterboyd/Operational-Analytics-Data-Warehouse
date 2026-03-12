@@ -9,6 +9,14 @@
 -- reporting → aggregated BI views
 -----------------------------------------------------
 
+-- =========================================
+-- CREATE STAGING SCHEMA (IF NOT EXISTS)
+-- =========================================
+-- The staging schema stores raw imported data from source systems
+-- with minimal transformation.
+-- 
+-- Data types are aligned but business rules are not yet applied.
+
 DECLARE @Schemas TABLE (SchemaName NVARCHAR(100))
 
 INSERT INTO @Schemas
@@ -19,13 +27,6 @@ VALUES
 ('reporting')
 
 DECLARE @SQL NVARCHAR(MAX) = ''
-
--- =========================================
--- CREATE STAGING SCHEMA (IF NOT EXISTS)
--- =========================================
--- The staging schema stores raw imported data from source systems
--- with minimal transformation. Data types are aligned but business
--- rules are not yet applied.
 
 SELECT @SQL = @SQL + '
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = ''' + SchemaName + ''')
@@ -43,7 +44,7 @@ GO
 -- =========================================
 -- STAGING TABLE: DELIVERIES
 -- =========================================
--- Raw delivery data imported from source files.
+-- Raw delivery data.
 -- Contains route, driver, delivery timing, and status information.
 
 IF OBJECT_ID('staging.staging_deliveries', 'U') IS NULL
@@ -65,6 +66,7 @@ GO
 -- =========================================
 -- STAGING TABLE: DELIVERY EXCEPTIONS
 -- =========================================
+-- Raw delivery exceptions data.
 -- Captures operational issues affecting deliveries
 -- such as delays, damages, or route problems.
 
@@ -86,6 +88,7 @@ GO
 -- =========================================
 -- STAGING TABLE: ROUTES
 -- =========================================
+-- Raw delivery exceptions data
 -- Contains planned vs actual route performance
 -- metrics for delivery drivers.
 
@@ -106,8 +109,8 @@ GO
 -- =========================================
 -- STAGING TABLE: SALES
 -- =========================================
--- Raw sales transactions tied to deliveries.
--- Used for building sales fact tables in the DW layer.
+-- Raw sales data
+-- Sales transactions tied to deliveries.
 
 IF OBJECT_ID('staging.staging_sales', 'U') IS NULL
 BEGIN
@@ -122,6 +125,7 @@ CREATE TABLE staging.staging_sales (
 );
 END
 GO
+
 
 -----------------------------------------------------
 -- BULK INSERT DATA INTO STAGING TABLES
@@ -174,7 +178,7 @@ PRINT 'CSV data loaded into staging tables';
 GO
 
 -----------------------------------------------------
--- Option 2: TRANSFER RAW IMPORTED TABLES INTO STAGING
+-- Option 2: TRANSFER DBO DATA TABLES INTO STAGING
 -- Many raw imports land in dbo by default.
 -- This section moves them into the staging schema.
 -----------------------------------------------------
