@@ -1,358 +1,411 @@
-/*==============================================================
+/*=============================================================
   CLEAN LAYER DATA PROFILING
-  Schema: clean
-  Version: 2.0
+  Database: Fedex_Ops_Database
+  Version:  3.0
 
-  PURPOSE
-  -------
-  Provide descriptive statistics and row-level insight into
-  the clean views after transformation. This script is
-  informational only — it does not halt the pipeline on
-  findings. Run it to investigate anomalies or verify
-  transformation output before a DW load.
+  Purpose:
+      Provide descriptive statistics and row-level insight into
+      the clean views after transformation. This script is
+      informational only -- it does not halt the pipeline on
+      any finding. Run it to investigate anomalies or verify
+      transformation output before a DW load.
 
-  For pipeline gate logic (PASS/FAIL with hard stops), use
-  07_clean_validation_gate_v2.0.sql instead.
+      For a hard pipeline stop on failures, use
+      07_clean_validation_gate_v3.0.sql instead.
 
-  STEPS
-  -----
-  1. Row count comparison  (staging vs clean, with drop rate)
-  2. Required field NULL counts
-  3. Business rule spot-checks
-  4. Data profiling statistics
+  Run Order:
+      1. etl_staging_setup_v5.sql          -- build schemas/tables
+      2. load_staging.py                   -- load CSV data
+      3. staging_layer_validation_v2.sql   -- validate staging
+      4. clean_layer_v1.sql                -- build clean views
+      5. THIS SCRIPT                       -- profile clean data
+      6. 06_clean_layer_validation_v3.0    -- human review
+      7. 07_clean_validation_gate_v3.0     -- pipeline gate
 
-  PIPELINE FLOW
-  -------------
-  staging -> clean -> [THIS SCRIPT] -> dw -> reporting -> Power BI
+  Clean Layer Views Referenced:
+      clean.clean_sales        -- standardized sales transactions
+      clean.clean_deliveries   -- standardized delivery records
+      clean.clean_routes       -- route performance with surrogate key
+      clean.clean_exceptions   -- standardized exception records
 
-  CHANGE LOG
-  ----------
-  v2.0 - Removed duplicate commented block (versioning artifact).
-       - Fixed routes subquery: changed PlannedHours <> 0 to
-         PlannedHours > 0 to match vw_routes filter exactly.
-       - Deliveries and exceptions subqueries now apply the same
-         WHERE conditions used by their respective views so
-         row-count discrepancies reflect true data quality drops,
-         not expected filter differences.
-       - Removed vw_exceptions.ResolvedDate from NULL checks;
-         NULL ResolvedDate is valid (open exception) and would
-         always produce a non-zero count, making the check
-         misleading.
-       - Added referential integrity check: DeliveryIDs in
-         vw_sales and vw_exceptions that have no matching row
-         in vw_deliveries.
-       - Added negative value checks on numeric columns.
-       - Added date range sanity checks.
-==============================================================*/
+  Steps:
+      1. Row count comparison     (staging vs clean, with retention rate)
+      2. Required field NULL counts
+      3. Business rule spot-checks
+      4. Referential integrity checks
+      5. Data range sanity checks
+      6. Descriptive profiling statistics
+
+=============================================================*/
+
+USE Fedex_Ops_Database;
+GO
 
 PRINT '--- CLEAN LAYER DATA PROFILING START ---';
 
-/*==============================================================
+/*=============================================================
   STEP 1: ROW COUNT COMPARISON
   Purpose:
-      Compare staging row counts (after applying the same
-      filters the views use) against clean view counts.
-      A ratio < 1.0 indicates rows were dropped; the drop
-      rate column makes this immediately visible.
+      Compare staging row counts against clean view counts.
+      The clean views do not filter any rows -- they apply
+      transformations only -- so CleanRowCount should always
+      equal StagingRowCount. A RetentionRate below 1.0
+      indicates unexpected row loss and warrants investigation
+      before the DW load.
+=============================================================*/
 
-      NOTE: Some drop is expected (null keys, invalid amounts).
-      Investigate if drop rate falls below ~0.95 unexpectedly.
-==============================================================*/
+PRINT '--- STEP 1: ROW COUNT COMPARISON ---';
 
-PRINT '--- STEP 1: ROW COUNT CHECKS ---';
-
--- Sales: subquery mirrors vw_sales WHERE clause exactly
+-- clean_sales vs staging_sales
 SELECT
-    'vw_sales'                                              AS ViewName,
-    COUNT(*)                                                AS CleanRowCount,
-    (SELECT COUNT(*)
-     FROM staging.staging_sales
-     WHERE SalesID    IS NOT NULL
-       AND DeliveryID IS NOT NULL
-       AND DateKey    IS NOT NULL
-       AND UnitsSold  > 0
-       AND SalesAmount > 0)                                 AS StagingValidRowCount,
+    'clean_sales'                                       AS ViewName,
+    COUNT(*)                                            AS CleanRowCount,
+    (SELECT COUNT(*) FROM staging.staging_sales)        AS StagingRowCount,
     CAST(COUNT(*) AS DECIMAL(10,4))
         / NULLIF(
-            (SELECT COUNT(*)
-             FROM staging.staging_sales
-             WHERE SalesID    IS NOT NULL
-               AND DeliveryID IS NOT NULL
-               AND DateKey    IS NOT NULL
-               AND UnitsSold  > 0
-               AND SalesAmount > 0),
-          0)                                                AS RetentionRate
-FROM clean.vw_sales;
+            (SELECT COUNT(*) FROM staging.staging_sales),
+          0)                                            AS RetentionRate
+FROM clean.clean_sales;
 
--- Deliveries: subquery mirrors vw_deliveries WHERE clause
+-- clean_deliveries vs staging_deliveries
 SELECT
-    'vw_deliveries'                                         AS ViewName,
-    COUNT(*)                                                AS CleanRowCount,
-    (SELECT COUNT(*)
-     FROM staging.staging_deliveries
-     WHERE DeliveryID           IS NOT NULL
-       AND RouteID              IS NOT NULL
-       AND DriverID             IS NOT NULL
-       AND DeliveryDate         IS NOT NULL
-       AND ExpectedDeliveryDate IS NOT NULL)                AS StagingValidRowCount,
+    'clean_deliveries'                                  AS ViewName,
+    COUNT(*)                                            AS CleanRowCount,
+    (SELECT COUNT(*) FROM staging.staging_deliveries)   AS StagingRowCount,
     CAST(COUNT(*) AS DECIMAL(10,4))
         / NULLIF(
-            (SELECT COUNT(*)
-             FROM staging.staging_deliveries
-             WHERE DeliveryID           IS NOT NULL
-               AND RouteID              IS NOT NULL
-               AND DriverID             IS NOT NULL
-               AND DeliveryDate         IS NOT NULL
-               AND ExpectedDeliveryDate IS NOT NULL),
-          0)                                                AS RetentionRate
-FROM clean.vw_deliveries;
+            (SELECT COUNT(*) FROM staging.staging_deliveries),
+          0)                                            AS RetentionRate
+FROM clean.clean_deliveries;
 
--- Exceptions: subquery mirrors vw_exceptions WHERE clause
+-- clean_routes vs staging_routes
 SELECT
-    'vw_exceptions'                                         AS ViewName,
-    COUNT(*)                                                AS CleanRowCount,
-    (SELECT COUNT(*)
-     FROM staging.staging_exceptions
-     WHERE ExceptionID  IS NOT NULL
-       AND DeliveryID   IS NOT NULL
-       AND DateReported IS NOT NULL)                        AS StagingValidRowCount,
+    'clean_routes'                                      AS ViewName,
+    COUNT(*)                                            AS CleanRowCount,
+    (SELECT COUNT(*) FROM staging.staging_routes)       AS StagingRowCount,
     CAST(COUNT(*) AS DECIMAL(10,4))
         / NULLIF(
-            (SELECT COUNT(*)
-             FROM staging.staging_exceptions
-             WHERE ExceptionID  IS NOT NULL
-               AND DeliveryID   IS NOT NULL
-               AND DateReported IS NOT NULL),
-          0)                                                AS RetentionRate
-FROM clean.vw_exceptions;
+            (SELECT COUNT(*) FROM staging.staging_routes),
+          0)                                            AS RetentionRate
+FROM clean.clean_routes;
 
--- Routes: subquery mirrors vw_routes WHERE clause exactly
+-- clean_exceptions vs staging_exceptions
 SELECT
-    'vw_routes'                                             AS ViewName,
-    COUNT(*)                                                AS CleanRowCount,
-    (SELECT COUNT(*)
-     FROM staging.staging_routes
-     WHERE RouteID      IS NOT NULL
-       AND DriverID     IS NOT NULL
-       AND PlannedStops > 0
-       AND ActualStops  > 0
-       AND PlannedHours > 0
-       AND ActualHours  > 0)                                AS StagingValidRowCount,
+    'clean_exceptions'                                  AS ViewName,
+    COUNT(*)                                            AS CleanRowCount,
+    (SELECT COUNT(*) FROM staging.staging_exceptions)   AS StagingRowCount,
     CAST(COUNT(*) AS DECIMAL(10,4))
         / NULLIF(
-            (SELECT COUNT(*)
-             FROM staging.staging_routes
-             WHERE RouteID      IS NOT NULL
-               AND DriverID     IS NOT NULL
-               AND PlannedStops > 0
-               AND ActualStops  > 0
-               AND PlannedHours > 0
-               AND ActualHours  > 0),
-          0)                                                AS RetentionRate
-FROM clean.vw_routes;
+            (SELECT COUNT(*) FROM staging.staging_exceptions),
+          0)                                            AS RetentionRate
+FROM clean.clean_exceptions;
 
 
-/*==============================================================
+/*=============================================================
   STEP 2: REQUIRED FIELD NULL COUNTS
   Purpose:
-      Count NULLs in fields that must be populated for a
-      successful DW load. A non-zero count here warrants
+      Count NULLs in columns that must be populated for a
+      successful DW load. A non-zero count warrants
       investigation before loading.
 
-      NOTE: vw_exceptions.ResolvedDate is intentionally excluded;
-      NULL means the exception is still open, which is valid.
-==============================================================*/
+      NOTE: clean_exceptions.ResolvedDate is excluded here.
+      NULL ResolvedDate is valid -- it means the exception is
+      still open. Flagging it as an error would always produce
+      a non-zero count, making the check misleading.
 
-PRINT '--- STEP 2: REQUIRED FIELD NULL CHECKS ---';
+      NOTE: clean_deliveries.DriverID is excluded here.
+      The view replaces all NULLs with 'Unknown' so it can
+      never be NULL. The Unknown DriverID count is reported
+      separately in Step 6 profiling instead.
+=============================================================*/
 
--- Sales required fields
-SELECT COUNT(*) AS NullCount, 'vw_sales.SalesID'     AS FieldName FROM clean.vw_sales WHERE SalesID     IS NULL
-UNION ALL
-SELECT COUNT(*),               'vw_sales.DeliveryID'              FROM clean.vw_sales WHERE DeliveryID   IS NULL
-UNION ALL
-SELECT COUNT(*),               'vw_sales.DateKey'                 FROM clean.vw_sales WHERE DateKey      IS NULL
-UNION ALL
-SELECT COUNT(*),               'vw_sales.UnitsSold'               FROM clean.vw_sales WHERE UnitsSold    IS NULL
-UNION ALL
-SELECT COUNT(*),               'vw_sales.SalesAmount'             FROM clean.vw_sales WHERE SalesAmount  IS NULL;
+PRINT '--- STEP 2: REQUIRED FIELD NULL COUNTS ---';
 
--- Deliveries required fields
-SELECT COUNT(*) AS NullCount, 'vw_deliveries.DeliveryID'          AS FieldName FROM clean.vw_deliveries WHERE DeliveryID           IS NULL
+-- clean_sales required fields
+SELECT COUNT(*) AS NullCount, 'clean_sales.SalesID'         AS FieldName
+FROM clean.clean_sales WHERE SalesID     IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_deliveries.RouteID'                           FROM clean.vw_deliveries WHERE RouteID              IS NULL
+SELECT COUNT(*),               'clean_sales.DeliveryID'
+FROM clean.clean_sales WHERE DeliveryID  IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_deliveries.DriverID'                          FROM clean.vw_deliveries WHERE DriverID             IS NULL
+SELECT COUNT(*),               'clean_sales.DateKey'
+FROM clean.clean_sales WHERE DateKey     IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_deliveries.DeliveryDate'                      FROM clean.vw_deliveries WHERE DeliveryDate         IS NULL
+SELECT COUNT(*),               'clean_sales.UnitsSold'
+FROM clean.clean_sales WHERE UnitsSold   IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_deliveries.DeliveryStatus'                    FROM clean.vw_deliveries WHERE DeliveryStatus       IS NULL;
+SELECT COUNT(*),               'clean_sales.SalesAmount'
+FROM clean.clean_sales WHERE SalesAmount IS NULL;
 
--- Exceptions required fields (ResolvedDate excluded — valid to be NULL)
-SELECT COUNT(*) AS NullCount, 'vw_exceptions.ExceptionID'         AS FieldName FROM clean.vw_exceptions WHERE ExceptionID  IS NULL
+-- clean_deliveries required fields (DriverID excluded - always 'Unknown' not NULL)
+SELECT COUNT(*) AS NullCount, 'clean_deliveries.DeliveryID'     AS FieldName
+FROM clean.clean_deliveries WHERE DeliveryID     IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_exceptions.DeliveryID'                        FROM clean.vw_exceptions WHERE DeliveryID   IS NULL
+SELECT COUNT(*),               'clean_deliveries.RouteID'
+FROM clean.clean_deliveries WHERE RouteID        IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_exceptions.DateReported'                      FROM clean.vw_exceptions WHERE DateReported IS NULL;
+SELECT COUNT(*),               'clean_deliveries.DeliveryDate'
+FROM clean.clean_deliveries WHERE DeliveryDate   IS NULL
+UNION ALL
+SELECT COUNT(*),               'clean_deliveries.DeliveryStatus'
+FROM clean.clean_deliveries WHERE DeliveryStatus IS NULL;
 
--- Routes required fields
-SELECT COUNT(*) AS NullCount, 'vw_routes.RouteID'                 AS FieldName FROM clean.vw_routes WHERE RouteID      IS NULL
+-- clean_exceptions required fields (ResolvedDate excluded - NULL means open exception)
+SELECT COUNT(*) AS NullCount, 'clean_exceptions.ExceptionID'    AS FieldName
+FROM clean.clean_exceptions WHERE ExceptionID  IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_routes.DriverID'                              FROM clean.vw_routes WHERE DriverID     IS NULL
+SELECT COUNT(*),               'clean_exceptions.DeliveryID'
+FROM clean.clean_exceptions WHERE DeliveryID   IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_routes.PlannedStops'                          FROM clean.vw_routes WHERE PlannedStops IS NULL
+SELECT COUNT(*),               'clean_exceptions.DateReported'
+FROM clean.clean_exceptions WHERE DateReported IS NULL;
+
+-- clean_routes required fields
+SELECT COUNT(*) AS NullCount, 'clean_routes.RouteID'            AS FieldName
+FROM clean.clean_routes WHERE RouteID      IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_routes.ActualStops'                           FROM clean.vw_routes WHERE ActualStops  IS NULL
+SELECT COUNT(*),               'clean_routes.PlannedStops'
+FROM clean.clean_routes WHERE PlannedStops IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_routes.PlannedHours'                          FROM clean.vw_routes WHERE PlannedHours IS NULL
+SELECT COUNT(*),               'clean_routes.ActualStops'
+FROM clean.clean_routes WHERE ActualStops  IS NULL
 UNION ALL
-SELECT COUNT(*),               'vw_routes.ActualHours'                           FROM clean.vw_routes WHERE ActualHours  IS NULL;
+SELECT COUNT(*),               'clean_routes.PlannedHours'
+FROM clean.clean_routes WHERE PlannedHours IS NULL
+UNION ALL
+SELECT COUNT(*),               'clean_routes.ActualHours'
+FROM clean.clean_routes WHERE ActualHours  IS NULL;
 
 
-/*==============================================================
+/*=============================================================
   STEP 3: BUSINESS RULE SPOT-CHECKS
   Purpose:
       Confirm transformations in the clean layer were applied
-      correctly. These should all return 0 rows/count.
-==============================================================*/
+      correctly. All counts should return 0.
 
-PRINT '--- STEP 3: BUSINESS RULE CHECKS ---';
+      NOTE: DeliveryStatus values in source data are mixed
+      case ('Late', 'On-Time', 'Exception'). Comparisons use
+      the exact casing from staging -- not 'LATE' or 'LATE'.
+=============================================================*/
 
--- Late deliveries flagged correctly (must compare 'LATE', all caps)
-SELECT COUNT(*) AS IncorrectLateFlag
-FROM clean.vw_deliveries
-WHERE DeliveryDate > ExpectedDeliveryDate
-  AND DeliveryStatus <> 'LATE';
+PRINT '--- STEP 3: BUSINESS RULE SPOT-CHECKS ---';
 
--- PriorityFlag normalized to 0/1 only
+-- IsLate flag set correctly:
+-- Any delivery where DeliveryStatus is 'Late' or 'Exception'
+-- must have IsLate = 1. Any row returned here is a mismatch.
+SELECT COUNT(*) AS IsLateFlagMismatch
+FROM clean.clean_deliveries
+WHERE DeliveryStatus IN ('Late', 'Exception')
+  AND IsLate <> 1;
+
+-- IsLate not set on On-Time deliveries:
+-- Any delivery where DeliveryStatus is 'On-Time' must have
+-- IsLate = 0. Any row returned here is a mismatch.
+SELECT COUNT(*) AS IsLateOnTimeMismatch
+FROM clean.clean_deliveries
+WHERE DeliveryStatus = 'On-Time'
+  AND IsLate <> 0;
+
+-- PriorityFlag contains only 0 or 1:
+-- The source BIT column should only ever produce these values.
 SELECT COUNT(*) AS InvalidPriorityFlag
-FROM clean.vw_deliveries
+FROM clean.clean_deliveries
 WHERE PriorityFlag NOT IN (0, 1);
 
--- Date-corrected exceptions (informational: how many had bad chronology)
-SELECT COUNT(*) AS DateCorrectedExceptions
-FROM clean.vw_exceptions
-WHERE IsDateCorrected = 1;
+-- IsResolved set correctly:
+-- Any exception with a populated ResolvedDate must have
+-- IsResolved = 1. Any row returned here is a mismatch.
+SELECT COUNT(*) AS IsResolvedFlagMismatch
+FROM clean.clean_exceptions
+WHERE ResolvedDate IS NOT NULL
+  AND IsResolved <> 1;
 
--- Negative or zero numeric values in routes (should be 0 after view filter)
+-- Negative or zero numeric values in routes:
+-- StopEfficiencyPct and HourEfficiencyPct are derived from
+-- positive denominators in the view, but checking the source
+-- confirms no invalid values slipped through.
 SELECT COUNT(*) AS InvalidRouteMetrics
-FROM clean.vw_routes
+FROM staging.staging_routes
 WHERE PlannedStops <= 0
    OR ActualStops  <= 0
    OR PlannedHours <= 0
    OR ActualHours  <= 0;
 
 
-/*==============================================================
+/*=============================================================
   STEP 4: REFERENTIAL INTEGRITY CHECKS
   Purpose:
-      Verify that DeliveryIDs in sales and exceptions exist
-      in the deliveries view. Orphaned IDs will silently
-      drop rows during DW fact table joins.
-==============================================================*/
+      Verify that DeliveryIDs in clean_sales and
+      clean_exceptions all exist in clean_deliveries.
+      Orphaned DeliveryIDs will silently lose rows during
+      DW fact table joins if not caught here.
+=============================================================*/
 
 PRINT '--- STEP 4: REFERENTIAL INTEGRITY ---';
 
--- Sales DeliveryIDs with no matching delivery record
+-- clean_sales DeliveryIDs with no matching delivery record
 SELECT COUNT(*) AS OrphanedSalesDeliveryIDs
-FROM clean.vw_sales s
+FROM clean.clean_sales s
 WHERE NOT EXISTS (
     SELECT 1
-    FROM clean.vw_deliveries d
+    FROM clean.clean_deliveries d
     WHERE d.DeliveryID = s.DeliveryID
 );
 
--- Exception DeliveryIDs with no matching delivery record
+-- clean_exceptions DeliveryIDs with no matching delivery record
 SELECT COUNT(*) AS OrphanedExceptionDeliveryIDs
-FROM clean.vw_exceptions e
+FROM clean.clean_exceptions e
 WHERE NOT EXISTS (
     SELECT 1
-    FROM clean.vw_deliveries d
+    FROM clean.clean_deliveries d
     WHERE d.DeliveryID = e.DeliveryID
 );
 
 
-/*==============================================================
+/*=============================================================
   STEP 5: DATA RANGE SANITY CHECKS
   Purpose:
       Flag obviously out-of-range values that may indicate
       CSV parsing errors or source data issues.
-==============================================================*/
+      Source data spans 2023-2025 based on CSV inspection.
+=============================================================*/
 
 PRINT '--- STEP 5: DATA RANGE SANITY ---';
 
--- Negative or zero sales values (should be 0 after view filter)
+-- Negative or zero sales values
 SELECT COUNT(*) AS NegativeOrZeroSales
-FROM clean.vw_sales
-WHERE UnitsSold  <= 0
+FROM clean.clean_sales
+WHERE UnitsSold   <= 0
    OR SalesAmount <= 0;
 
--- Future-dated deliveries (DeliveryDate beyond today)
-SELECT COUNT(*) AS FutureDatedDeliveries
-FROM clean.vw_deliveries
-WHERE DeliveryDate > CAST(GETDATE() AS DATE);
+-- Sales dates outside expected range (2023-2025)
+SELECT COUNT(*) AS SalesOutOfRange
+FROM clean.clean_sales
+WHERE SaleDate < '2023-01-01'
+   OR SaleDate > '2025-12-31';
 
--- Exceptions reported in the future
-SELECT COUNT(*) AS FutureDatedExceptions
-FROM clean.vw_exceptions
-WHERE DateReported > CAST(GETDATE() AS DATE);
+-- Delivery dates outside expected range (2023-2025)
+SELECT COUNT(*) AS DeliveryDatesOutOfRange
+FROM clean.clean_deliveries
+WHERE DeliveryDateOnly < '2023-01-01'
+   OR DeliveryDateOnly > '2025-12-31';
+
+-- Exception dates outside expected range (2023-2025)
+SELECT COUNT(*) AS ExceptionDatesOutOfRange
+FROM clean.clean_exceptions
+WHERE DateReportedOnly < '2023-01-01'
+   OR DateReportedOnly > '2025-12-31';
+
+-- ResolvedDate before DateReported (chronology error)
+-- Should always be 0 -- the clean layer does not correct
+-- date ordering so any row here is a source data defect.
+SELECT COUNT(*) AS ResolvedBeforeReported
+FROM clean.clean_exceptions
+WHERE ResolvedDate IS NOT NULL
+  AND ResolvedDate < DateReported;
 
 
-/*==============================================================
+/*=============================================================
   STEP 6: DESCRIPTIVE PROFILING
   Purpose:
       Provide summary statistics for anomaly detection and
-      pre-load sense checking.
-==============================================================*/
+      pre-load sense checking. Review for unexpected
+      distributions or outlier values before DW load.
+=============================================================*/
 
-PRINT '--- STEP 6: DATA PROFILING ---';
+PRINT '--- STEP 6: DESCRIPTIVE PROFILING ---';
 
 -- Sales amount statistics by region
 SELECT
     Region,
-    COUNT(*)            AS Transactions,
-    SUM(SalesAmount)    AS TotalSales,
-    AVG(SalesAmount)    AS AvgSale,
-    MIN(SalesAmount)    AS MinSale,
-    MAX(SalesAmount)    AS MaxSale
-FROM clean.vw_sales
+    COUNT(*)                                            AS Transactions,
+    SUM(SalesAmount)                                    AS TotalSales,
+    ROUND(AVG(SalesAmount), 2)                          AS AvgSale,
+    MIN(SalesAmount)                                    AS MinSale,
+    MAX(SalesAmount)                                    AS MaxSale
+FROM clean.clean_sales
 GROUP BY Region
 ORDER BY Region;
 
 -- Units sold distribution by product type
 SELECT
     ProductType,
-    COUNT(*)            AS Transactions,
-    SUM(UnitsSold)      AS TotalUnits,
-    AVG(UnitsSold)      AS AvgUnits,
-    MIN(UnitsSold)      AS MinUnits,
-    MAX(UnitsSold)      AS MaxUnits
-FROM clean.vw_sales
+    COUNT(*)                                            AS Transactions,
+    SUM(UnitsSold)                                      AS TotalUnits,
+    ROUND(AVG(CAST(UnitsSold AS DECIMAL(10,2))), 2)     AS AvgUnits,
+    MIN(UnitsSold)                                      AS MinUnits,
+    MAX(UnitsSold)                                      AS MaxUnits
+FROM clean.clean_sales
 GROUP BY ProductType
 ORDER BY ProductType;
 
 -- Delivery status distribution
 SELECT
     DeliveryStatus,
-    COUNT(*)            AS RecordCount
-FROM clean.vw_deliveries
+    COUNT(*)                                            AS RecordCount,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
+    2)                                                  AS PctOfTotal
+FROM clean.clean_deliveries
 GROUP BY DeliveryStatus
 ORDER BY RecordCount DESC;
 
--- Route efficiency summary
+-- IsLate distribution (confirms binary flag is populated)
 SELECT
-    MIN(EfficiencyRatio)    AS MinEfficiency,
-    MAX(EfficiencyRatio)    AS MaxEfficiency,
-    AVG(EfficiencyRatio)    AS AvgEfficiency,
-    MIN(StopVariance)       AS MinStopVariance,
-    MAX(StopVariance)       AS MaxStopVariance,
-    AVG(CAST(StopVariance AS DECIMAL(10,2))) AS AvgStopVariance
-FROM clean.vw_routes;
+    IsLate,
+    COUNT(*)                                            AS RecordCount
+FROM clean.clean_deliveries
+GROUP BY IsLate
+ORDER BY IsLate;
+
+-- Route efficiency summary
+-- StopEfficiencyPct: how many actual stops vs planned (%)
+-- HourEfficiencyPct: how well time was used vs actual (%)
+SELECT
+    MIN(StopEfficiencyPct)                              AS MinStopEfficiency,
+    MAX(StopEfficiencyPct)                              AS MaxStopEfficiency,
+    ROUND(AVG(StopEfficiencyPct), 2)                    AS AvgStopEfficiency,
+    MIN(HourEfficiencyPct)                              AS MinHourEfficiency,
+    MAX(HourEfficiencyPct)                              AS MaxHourEfficiency,
+    ROUND(AVG(HourEfficiencyPct), 2)                    AS AvgHourEfficiency,
+    MIN(StopVariance)                                   AS MinStopVariance,
+    MAX(StopVariance)                                   AS MaxStopVariance,
+    ROUND(AVG(CAST(StopVariance AS DECIMAL(10,2))), 2)  AS AvgStopVariance
+FROM clean.clean_routes;
+
+-- Unknown DriverID count in clean_routes
+-- Reports the extent of missing driver data that was replaced
+-- with 'Unknown' during the clean layer transformation.
+SELECT
+    COUNT(*)                                            AS UnknownDriverCount
+FROM clean.clean_routes
+WHERE DriverID = 'Unknown';
+
+-- Exception type distribution
+SELECT
+    ExceptionType,
+    COUNT(*)                                            AS RecordCount,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
+    2)                                                  AS PctOfTotal
+FROM clean.clean_exceptions
+GROUP BY ExceptionType
+ORDER BY RecordCount DESC;
+
+-- Open vs resolved exceptions
+SELECT
+    IsResolved,
+    COUNT(*)                                            AS RecordCount
+FROM clean.clean_exceptions
+GROUP BY IsResolved
+ORDER BY IsResolved;
 
 
-/*==============================================================
+/*=============================================================
   PROFILING COMPLETE
-==============================================================*/
+=============================================================*/
 
 PRINT '--- CLEAN LAYER DATA PROFILING END ---';
 PRINT 'Review all result sets carefully before loading DW tables.';
-PRINT 'For a hard pipeline stop on failures, run 07_clean_validation_gate_v2.0.sql.';
+PRINT 'For a hard pipeline stop on failures, run 07_clean_validation_gate_v3.0.sql.';
+GO

@@ -1,265 +1,348 @@
-/*==============================================================
+/*=============================================================
   CLEAN LAYER VALIDATION
-  Schema: clean
-  Version: 2.0
+  Database: Fedex_Ops_Database
+  Version:  3.0
 
-  PURPOSE
-  -------
-  Validate cleansed datasets before loading them into the
-  Data Warehouse (dw schema). This script is informational —
-  it surfaces issues for human review but does not halt the
-  pipeline. For an automated hard stop, use
-  07_clean_validation_gate_v2.0.sql.
+  Purpose:
+      Validate cleansed datasets before loading them into the
+      Data Warehouse (dw schema). This script is informational
+      -- it surfaces issues for human review but does not halt
+      the pipeline. For an automated hard stop, use
+      07_clean_validation_gate_v3.0.sql.
 
-  CHECKS PERFORMED
-  ----------------
-  1. Row count comparison (staging vs clean)
-  2. Required field NULL validation
-  3. Business rule verification
-  4. Referential integrity checks
-  5. Data profiling metrics
+  Run Order:
+      1. etl_staging_setup_v5.sql          -- build schemas/tables
+      2. load_staging.py                   -- load CSV data
+      3. staging_layer_validation_v2.sql   -- validate staging
+      4. clean_layer_v1.sql                -- build clean views
+      5. 05_clean_layer_data_profiling     -- profile clean data
+      6. THIS SCRIPT                       -- human review
+      7. 07_clean_validation_gate_v3.0     -- pipeline gate
 
-  PIPELINE FLOW
-  -------------
-  staging -> clean -> [THIS SCRIPT] -> dw -> reporting -> Power BI
+  Clean Layer Views Referenced:
+      clean.clean_sales        -- standardized sales transactions
+      clean.clean_deliveries   -- standardized delivery records
+      clean.clean_routes       -- route performance with surrogate key
+      clean.clean_exceptions   -- standardized exception records
 
-  CHANGE LOG
-  ----------
-  v2.0 - Removed duplicate commented block (versioning artifact).
-       - Fixed late delivery check: 'Late' corrected to 'LATE'
-         to match the value produced by vw_deliveries.
-       - Replaced SELECT * in NULL checks with key columns only
-         to avoid unnecessarily wide result sets in production.
-       - Added referential integrity checks for DeliveryID
-         across vw_sales and vw_exceptions.
-       - Renamed file prefix from 05_ to 06_ to avoid
-         filename-ordering collision with the profiling script.
-==============================================================*/
+  Checks Performed:
+      1. Row count comparison     (staging vs clean)
+      2. Required field NULL validation
+      3. Business rule verification
+      4. Referential integrity checks
+      5. Data profiling metrics
+
+=============================================================*/
+
+USE Fedex_Ops_Database;
+GO
 
 PRINT '===== CLEAN LAYER VALIDATION START =====';
 
 
-/*==============================================================
+/*=============================================================
   1. ROW COUNT VALIDATION
   Purpose:
-      Ensure records successfully flowed from staging into
-      the clean views. Large discrepancies may indicate a
-      failed bulk load or unexpected data quality drops.
-==============================================================*/
+      Ensure all records flowed from staging into the clean
+      views. The clean layer applies transformations only --
+      it does not filter rows -- so CleanRows should always
+      equal StagingRows. A non-zero DroppedRows count
+      indicates unexpected row loss and must be investigated
+      before the DW load.
+=============================================================*/
 
 PRINT '===== 1. ROW COUNT VALIDATION =====';
 
 SELECT
-    'Sales'       AS TableName,
-    (SELECT COUNT(*) FROM staging.staging_sales)       AS StagingRows,
-    (SELECT COUNT(*) FROM clean.vw_sales)              AS CleanRows,
+    'Sales'                                             AS TableName,
+    (SELECT COUNT(*) FROM staging.staging_sales)        AS StagingRows,
+    (SELECT COUNT(*) FROM clean.clean_sales)            AS CleanRows,
     (SELECT COUNT(*) FROM staging.staging_sales)
-        - (SELECT COUNT(*) FROM clean.vw_sales)        AS DroppedRows;
+        - (SELECT COUNT(*) FROM clean.clean_sales)      AS DroppedRows;
 
 SELECT
-    'Deliveries'  AS TableName,
-    (SELECT COUNT(*) FROM staging.staging_deliveries)  AS StagingRows,
-    (SELECT COUNT(*) FROM clean.vw_deliveries)         AS CleanRows,
+    'Deliveries'                                        AS TableName,
+    (SELECT COUNT(*) FROM staging.staging_deliveries)   AS StagingRows,
+    (SELECT COUNT(*) FROM clean.clean_deliveries)       AS CleanRows,
     (SELECT COUNT(*) FROM staging.staging_deliveries)
-        - (SELECT COUNT(*) FROM clean.vw_deliveries)   AS DroppedRows;
+        - (SELECT COUNT(*) FROM clean.clean_deliveries) AS DroppedRows;
 
 SELECT
-    'Exceptions'  AS TableName,
-    (SELECT COUNT(*) FROM staging.staging_exceptions)  AS StagingRows,
-    (SELECT COUNT(*) FROM clean.vw_exceptions)         AS CleanRows,
+    'Exceptions'                                        AS TableName,
+    (SELECT COUNT(*) FROM staging.staging_exceptions)   AS StagingRows,
+    (SELECT COUNT(*) FROM clean.clean_exceptions)       AS CleanRows,
     (SELECT COUNT(*) FROM staging.staging_exceptions)
-        - (SELECT COUNT(*) FROM clean.vw_exceptions)   AS DroppedRows;
+        - (SELECT COUNT(*) FROM clean.clean_exceptions) AS DroppedRows;
 
 SELECT
-    'Routes'      AS TableName,
-    (SELECT COUNT(*) FROM staging.staging_routes)      AS StagingRows,
-    (SELECT COUNT(*) FROM clean.vw_routes)             AS CleanRows,
+    'Routes'                                            AS TableName,
+    (SELECT COUNT(*) FROM staging.staging_routes)       AS StagingRows,
+    (SELECT COUNT(*) FROM clean.clean_routes)           AS CleanRows,
     (SELECT COUNT(*) FROM staging.staging_routes)
-        - (SELECT COUNT(*) FROM clean.vw_routes)       AS DroppedRows;
+        - (SELECT COUNT(*) FROM clean.clean_routes)     AS DroppedRows;
 
 
-/*==============================================================
+/*=============================================================
   2. REQUIRED FIELD NULL CHECKS
   Purpose:
-      Identify records missing critical identifiers that would
-      break fact table loading or dimension joins.
-      Only key columns are returned (not SELECT *) to keep
-      output actionable in production environments.
-==============================================================*/
+      Return rows missing critical identifiers that would
+      break fact table loading or dimension joins. Only key
+      columns are returned to keep output actionable.
+
+      NOTE: clean_exceptions.ResolvedDate is excluded --
+      NULL means the exception is still open, which is valid.
+
+      NOTE: clean_deliveries.DriverID is excluded -- the view
+      replaces all NULLs with 'Unknown' so it can never be
+      NULL after transformation.
+=============================================================*/
 
 PRINT '===== 2. NULL VALIDATION =====';
 
--- Sales: rows missing any critical field
+-- clean_sales: rows missing any critical field
 SELECT
     SalesID,
     DeliveryID,
     DateKey,
     UnitsSold,
     SalesAmount,
-    'NULL critical field' AS Issue
-FROM clean.vw_sales
+    'NULL critical field'                               AS Issue
+FROM clean.clean_sales
 WHERE DateKey     IS NULL
    OR SalesAmount IS NULL
    OR UnitsSold   IS NULL;
 
--- Deliveries: rows missing any required identifier
+-- clean_deliveries: rows missing any required identifier
+-- DriverID excluded: view guarantees 'Unknown' not NULL
 SELECT
     DeliveryID,
     RouteID,
-    DriverID,
-    'NULL critical field' AS Issue
-FROM clean.vw_deliveries
-WHERE DeliveryID IS NULL
-   OR RouteID    IS NULL
-   OR DriverID   IS NULL;
+    DeliveryDate,
+    DeliveryStatus,
+    'NULL critical field'                               AS Issue
+FROM clean.clean_deliveries
+WHERE DeliveryID     IS NULL
+   OR RouteID        IS NULL
+   OR DeliveryDate   IS NULL
+   OR DeliveryStatus IS NULL;
 
--- Exceptions: rows missing required identifiers
--- NOTE: ResolvedDate IS NULL is valid (open exception); it is
--- not treated as an error here.
+-- clean_exceptions: rows missing required identifiers
+-- ResolvedDate excluded: NULL = open exception, not an error
 SELECT
     ExceptionID,
     DeliveryID,
     DateReported,
-    'NULL critical field' AS Issue
-FROM clean.vw_exceptions
+    'NULL critical field'                               AS Issue
+FROM clean.clean_exceptions
 WHERE ExceptionID  IS NULL
    OR DeliveryID   IS NULL
    OR DateReported IS NULL;
 
+-- clean_routes: rows missing required identifiers
+-- DriverID excluded: view guarantees 'Unknown' not NULL
+SELECT
+    RouteID,
+    PlannedStops,
+    ActualStops,
+    PlannedHours,
+    ActualHours,
+    'NULL critical field'                               AS Issue
+FROM clean.clean_routes
+WHERE RouteID      IS NULL
+   OR PlannedStops IS NULL
+   OR ActualStops  IS NULL
+   OR PlannedHours IS NULL
+   OR ActualHours  IS NULL;
 
-/*==============================================================
+
+/*=============================================================
   3. BUSINESS RULE VALIDATION
   Purpose:
-      Confirm that transformation rules in the clean layer
-      were applied correctly.
-==============================================================*/
+      Confirm transformation rules in the clean layer were
+      applied correctly. All result sets should return 0 rows.
+
+      NOTE: DeliveryStatus casing matches the staging source
+      exactly -- 'Late', 'On-Time', 'Exception' -- not 'LATE'.
+=============================================================*/
 
 PRINT '===== 3. BUSINESS RULE CHECKS =====';
 
--- LATE DELIVERY RULE VALIDATION
--- vw_deliveries produces 'LATE' (all caps). Any rows returned
--- here indicate the business rule was not applied correctly.
+-- IsLate flag check:
+-- Every delivery with status 'Late' or 'Exception' must have
+-- IsLate = 1. Rows returned here are mismatches.
 SELECT TOP 20
     DeliveryID,
     DeliveryDate,
     ExpectedDeliveryDate,
     DeliveryStatus,
-    'Expected LATE status' AS Issue
-FROM clean.vw_deliveries
-WHERE DeliveryDate > ExpectedDeliveryDate
-  AND DeliveryStatus <> 'LATE';
+    IsLate,
+    'IsLate should be 1'                                AS Issue
+FROM clean.clean_deliveries
+WHERE DeliveryStatus IN ('Late', 'Exception')
+  AND IsLate <> 1;
 
--- PRIORITY FLAG NORMALIZATION
+-- IsLate not set on On-Time deliveries:
+-- Every 'On-Time' delivery must have IsLate = 0.
+-- Rows returned here are mismatches.
+SELECT TOP 20
+    DeliveryID,
+    DeliveryStatus,
+    IsLate,
+    'IsLate should be 0'                                AS Issue
+FROM clean.clean_deliveries
+WHERE DeliveryStatus = 'On-Time'
+  AND IsLate <> 0;
+
+-- PriorityFlag normalization:
 -- Should show only values 0 and 1. Any other value is an error.
 SELECT
     PriorityFlag,
-    COUNT(*) AS RecordCount
-FROM clean.vw_deliveries
+    COUNT(*)                                            AS RecordCount
+FROM clean.clean_deliveries
 GROUP BY PriorityFlag
 ORDER BY PriorityFlag;
 
--- DATE CORRECTION AUDIT
--- Informational: how many exception records had their
--- ResolvedDate corrected due to chronology errors.
-SELECT
-    COUNT(*) AS DateCorrectedCount
-FROM clean.vw_exceptions
-WHERE IsDateCorrected = 1;
+-- IsResolved flag check:
+-- Every exception with a populated ResolvedDate must have
+-- IsResolved = 1. Rows returned here are mismatches.
+SELECT TOP 20
+    ExceptionID,
+    ResolvedDate,
+    IsResolved,
+    'IsResolved should be 1'                            AS Issue
+FROM clean.clean_exceptions
+WHERE ResolvedDate IS NOT NULL
+  AND IsResolved <> 1;
+
+-- Truncation check: no abbreviated values should remain
+-- after clean layer transformation. All counts should be 0.
+SELECT 'clean_sales       ProductType'   AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_sales      WHERE ProductType   LIKE '_.'
+UNION ALL
+SELECT 'clean_sales       Region'        AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_sales      WHERE Region        LIKE '_.'
+UNION ALL
+SELECT 'clean_deliveries  ShipmentType'  AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_deliveries WHERE ShipmentType  LIKE '_.'
+UNION ALL
+SELECT 'clean_deliveries  Region'        AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_deliveries WHERE Region        LIKE '_.'
+UNION ALL
+SELECT 'clean_exceptions  ExceptionType' AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_exceptions WHERE ExceptionType LIKE '_.'
+UNION ALL
+SELECT 'clean_routes      Region'        AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_routes     WHERE Region        LIKE '_.'
+UNION ALL
+SELECT 'clean_routes      Unknown DriverID' AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_routes     WHERE DriverID = 'Unknown';
 
 
-/*==============================================================
+/*=============================================================
   4. REFERENTIAL INTEGRITY CHECKS
   Purpose:
-      Validate that DeliveryIDs in vw_sales and vw_exceptions
-      exist in vw_deliveries. Orphaned IDs will silently lose
-      rows during DW fact table joins.
-==============================================================*/
+      Validate that DeliveryIDs in clean_sales and
+      clean_exceptions all exist in clean_deliveries.
+      Orphaned DeliveryIDs will silently drop rows during
+      DW fact table joins if not caught here.
+=============================================================*/
 
 PRINT '===== 4. REFERENTIAL INTEGRITY =====';
 
--- Sales DeliveryIDs with no matching delivery record
+-- clean_sales DeliveryIDs with no matching delivery record
 SELECT
     s.SalesID,
     s.DeliveryID,
-    'No matching delivery' AS Issue
-FROM clean.vw_sales s
+    'No matching delivery'                              AS Issue
+FROM clean.clean_sales s
 WHERE NOT EXISTS (
     SELECT 1
-    FROM clean.vw_deliveries d
+    FROM clean.clean_deliveries d
     WHERE d.DeliveryID = s.DeliveryID
 );
 
--- Exception DeliveryIDs with no matching delivery record
+-- clean_exceptions DeliveryIDs with no matching delivery record
 SELECT
     e.ExceptionID,
     e.DeliveryID,
-    'No matching delivery' AS Issue
-FROM clean.vw_exceptions e
+    'No matching delivery'                              AS Issue
+FROM clean.clean_exceptions e
 WHERE NOT EXISTS (
     SELECT 1
-    FROM clean.vw_deliveries d
+    FROM clean.clean_deliveries d
     WHERE d.DeliveryID = e.DeliveryID
 );
 
 
-/*==============================================================
-  5. DATA PROFILING — SALES METRICS
+/*=============================================================
+  5. DATA PROFILING METRICS
   Purpose:
-      Provide quick statistical insight into cleaned sales data
-      for anomaly detection before DW load.
-==============================================================*/
+      Quick statistical summary for anomaly detection before
+      DW load. Review for unexpected distributions or values.
+=============================================================*/
 
-PRINT '===== 5. SALES DATA PROFILE =====';
+PRINT '===== 5. DATA PROFILING =====';
 
+-- Sales summary statistics
 SELECT
-    MIN(SalesAmount)  AS MinSales,
-    MAX(SalesAmount)  AS MaxSales,
-    AVG(SalesAmount)  AS AvgSales,
-    SUM(SalesAmount)  AS TotalSales,
-    COUNT(*)          AS RecordCount
-FROM clean.vw_sales;
+    MIN(SalesAmount)                                    AS MinSales,
+    MAX(SalesAmount)                                    AS MaxSales,
+    ROUND(AVG(SalesAmount), 2)                          AS AvgSales,
+    SUM(SalesAmount)                                    AS TotalSales,
+    COUNT(*)                                            AS RecordCount
+FROM clean.clean_sales;
 
-
-/*==============================================================
-  6. DATA PROFILING — REGION DISTRIBUTION
-  Purpose:
-      Identify regional distribution patterns and detect
-      unexpected or missing region values.
-==============================================================*/
-
-PRINT '===== 6. REGION DISTRIBUTION =====';
-
+-- Sales region distribution
 SELECT
     Region,
-    COUNT(*) AS RecordCount
-FROM clean.vw_sales
+    COUNT(*)                                            AS RecordCount,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
+    2)                                                  AS PctOfTotal
+FROM clean.clean_sales
 GROUP BY Region
 ORDER BY RecordCount DESC;
 
-
-/*==============================================================
-  7. ROUTE PERFORMANCE VALIDATION
-  Purpose:
-      Ensure operational metrics are within reasonable ranges
-      and derived columns are producing sensible values.
-==============================================================*/
-
-PRINT '===== 7. ROUTE VALIDATION =====';
-
+-- Delivery status distribution
 SELECT
-    MIN(ActualStops)       AS MinStops,
-    MAX(ActualStops)       AS MaxStops,
-    AVG(ActualHours)       AS AvgHours,
-    MIN(EfficiencyRatio)   AS MinEfficiency,
-    MAX(EfficiencyRatio)   AS MaxEfficiency,
-    AVG(EfficiencyRatio)   AS AvgEfficiency
-FROM clean.vw_routes;
+    DeliveryStatus,
+    COUNT(*)                                            AS RecordCount,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
+    2)                                                  AS PctOfTotal
+FROM clean.clean_deliveries
+GROUP BY DeliveryStatus
+ORDER BY RecordCount DESC;
+
+-- Route efficiency metrics
+-- StopEfficiencyPct: actual stops as % of planned stops
+-- HourEfficiencyPct: planned hours as % of actual hours
+SELECT
+    MIN(StopEfficiencyPct)                              AS MinStopEfficiency,
+    MAX(StopEfficiencyPct)                              AS MaxStopEfficiency,
+    ROUND(AVG(StopEfficiencyPct), 2)                    AS AvgStopEfficiency,
+    MIN(HourEfficiencyPct)                              AS MinHourEfficiency,
+    MAX(HourEfficiencyPct)                              AS MaxHourEfficiency,
+    ROUND(AVG(HourEfficiencyPct), 2)                    AS AvgHourEfficiency
+FROM clean.clean_routes;
+
+-- Exception type distribution
+SELECT
+    ExceptionType,
+    COUNT(*)                                            AS RecordCount,
+    ROUND(
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
+    2)                                                  AS PctOfTotal
+FROM clean.clean_exceptions
+GROUP BY ExceptionType
+ORDER BY RecordCount DESC;
 
 
-/*==============================================================
+/*=============================================================
   VALIDATION COMPLETE
-==============================================================*/
+=============================================================*/
 
-PRINT '===== VALIDATION COMPLETE =====';
+PRINT '===== CLEAN LAYER VALIDATION COMPLETE =====';
 PRINT 'Review result sets above before loading DW tables.';
-PRINT 'To halt the pipeline automatically on failures, run 07_clean_validation_gate_v2.0.sql.';
+PRINT 'To halt the pipeline automatically on failures, run 07_clean_validation_gate_v3.0.sql.';
+GO

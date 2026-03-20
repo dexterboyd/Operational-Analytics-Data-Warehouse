@@ -1,139 +1,139 @@
-/*==============================================================
+/*=============================================================
   CLEAN LAYER VALIDATION GATE
-  Schema: clean
-  Version: 2.0
+  Database: Fedex_Ops_Database
+  Version:  3.0
 
-  PURPOSE
-  -------
-  Production data quality gate before DW load. Executes a
-  series of checks and calls THROW to abort the pipeline if
-  any check fails. Designed to be called from a SQL Agent
-  job step or pipeline orchestrator.
+  Purpose:
+      Production data quality gate before DW load. Executes a
+      series of checks and calls THROW to abort the pipeline
+      if any check fails. Designed to be called from a SQL
+      Agent job step or pipeline orchestrator.
 
-  BEHAVIOR
-  --------
-  - Each check sets @BadRows and logs PASS or FAIL
-  - @FailureCount accumulates across all checks
-  - If @FailureCount > 0 at the end, THROW halts execution
-    and the DW load step should not proceed
-  - SET XACT_ABORT ON ensures any open transaction is rolled
-    back if the THROW fires inside a transaction context
+  Behavior:
+      - Each check sets @BadRows and logs PASS or FAIL
+      - @FailureCount accumulates across all checks
+      - If @FailureCount > 0 at the end, THROW halts execution
+        and the DW load step should not proceed
+      - SET XACT_ABORT ON ensures any open transaction is
+        rolled back if THROW fires inside a transaction context
 
-  CHECKS PERFORMED
-  ----------------
-  1.  Empty table guard   — all four clean views must have rows
-  2.  Sales required fields
-  3.  Delivery required fields
-  4.  Late delivery business rule
-  5.  PriorityFlag normalization
-  6.  Route hours validity  (checked against staging to avoid
-                              vacuous pass from view filter)
-  7.  Referential integrity — vw_sales.DeliveryID
-  8.  Referential integrity — vw_exceptions.DeliveryID
+  Run Order:
+      1. etl_staging_setup_v5.sql          -- build schemas/tables
+      2. load_staging.py                   -- load CSV data
+      3. staging_layer_validation_v2.sql   -- validate staging
+      4. clean_layer_v1.sql                -- build clean views
+      5. 05_clean_layer_data_profiling     -- profile clean data
+      6. 06_clean_layer_validation         -- human review
+      7. THIS SCRIPT                       -- pipeline gate
 
-  PIPELINE STAGE
-  --------------
-  staging -> clean -> [THIS GATE] -> dw -> reporting -> Power BI
+  Clean Layer Views Referenced:
+      clean.clean_sales        -- standardized sales transactions
+      clean.clean_deliveries   -- standardized delivery records
+      clean.clean_routes       -- route performance with surrogate key
+      clean.clean_exceptions   -- standardized exception records
 
-  CHANGE LOG
-  ----------
-  v2.0 - Added SET XACT_ABORT ON for safe transactional use.
-       - Added SET LOCK_TIMEOUT to prevent silent pipeline stall
-         on blocked scans.
-       - Added Check 1: empty-table guard for all four clean
-         views. An empty view means a silent bulk load failure;
-         without this, all downstream null checks pass vacuously.
-       - Fixed Check 4: changed 'Late' to 'LATE' to match the
-         value produced by vw_deliveries (critical bug fix —
-         the old value caused every run to fail).
-       - Fixed Check 5 (was Check 4): route hours check now
-         queries staging.staging_routes directly instead of
-         vw_routes. The view's own WHERE already excludes
-         invalid hours, so checking the view was a vacuous pass.
-       - Added Check 6: referential integrity for vw_sales.
-       - Added Check 7: referential integrity for vw_exceptions.
-       - Removed duplicate commented block (versioning artifact).
-==============================================================*/
+  Checks Performed:
+      1.  Empty table guard      -- all four clean views must have rows
+      2.  Sales required fields  -- DateKey, SalesAmount, UnitsSold not NULL
+      3.  Delivery required fields -- DeliveryID, RouteID, DeliveryDate not NULL
+      4.  IsLate flag accuracy   -- Late/Exception rows must have IsLate = 1
+      5.  IsLate false positive  -- On-Time rows must have IsLate = 0
+      6.  PriorityFlag values    -- must be 0 or 1 only
+      7.  IsResolved accuracy    -- rows with ResolvedDate must have IsResolved = 1
+      8.  Truncation check       -- no abbreviated values remain in clean layer
+      9.  Route source validity  -- no invalid stops/hours in staging source data
+      10. Referential integrity  -- clean_sales.DeliveryID exists in clean_deliveries
+      11. Referential integrity  -- clean_exceptions.DeliveryID exists in clean_deliveries
+
+=============================================================*/
 
 SET XACT_ABORT ON;
 
 -- Abort if any single scan blocks for more than 30 seconds.
--- Adjust or remove this line if long-running queries are expected.
+-- Adjust or remove if long-running queries are expected in
+-- your environment.
 SET LOCK_TIMEOUT 30000;
+
+USE Fedex_Ops_Database;
+GO
 
 PRINT '===== CLEAN VALIDATION GATE START =====';
 
-/*==============================================================
+/*=============================================================
   CONTROL VARIABLES
-==============================================================*/
-DECLARE @FailureCount INT       = 0;
+=============================================================*/
+
+DECLARE @FailureCount INT        = 0;
 DECLARE @CheckName    NVARCHAR(200);
 DECLARE @BadRows      INT;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 1: EMPTY TABLE GUARD
   Purpose:
-      If any clean view is empty the bulk load likely failed
-      silently. All downstream null and rule checks would pass
-      vacuously on an empty dataset, giving a false all-clear.
-      Fail immediately if any view returns zero rows.
-==============================================================*/
-SET @CheckName = 'vw_sales — not empty';
+      If any clean view returns zero rows the bulk load likely
+      failed silently. All downstream null and rule checks
+      would pass vacuously on an empty dataset, producing a
+      false all-clear. Fail immediately if any view is empty.
+=============================================================*/
+
+SET @CheckName = 'clean_sales — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
-FROM clean.vw_sales;
+FROM clean.clean_sales;
 IF @BadRows > 0
 BEGIN
-    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows — bulk load may have failed';
+    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows -- bulk load may have failed';
     SET @FailureCount += 1;
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'vw_deliveries — not empty';
+SET @CheckName = 'clean_deliveries — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
-FROM clean.vw_deliveries;
+FROM clean.clean_deliveries;
 IF @BadRows > 0
 BEGIN
-    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows — bulk load may have failed';
+    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows -- bulk load may have failed';
     SET @FailureCount += 1;
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'vw_exceptions — not empty';
+SET @CheckName = 'clean_exceptions — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
-FROM clean.vw_exceptions;
+FROM clean.clean_exceptions;
 IF @BadRows > 0
 BEGIN
-    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows — bulk load may have failed';
+    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows -- bulk load may have failed';
     SET @FailureCount += 1;
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'vw_routes — not empty';
+SET @CheckName = 'clean_routes — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
-FROM clean.vw_routes;
+FROM clean.clean_routes;
 IF @BadRows > 0
 BEGIN
-    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows — bulk load may have failed';
+    PRINT 'FAIL: ' + @CheckName + ' | View contains zero rows -- bulk load may have failed';
     SET @FailureCount += 1;
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 2: SALES REQUIRED FIELDS
   Purpose:
       Ensure DateKey, SalesAmount, and UnitsSold are populated
-      on every row that passed the view filter.
-==============================================================*/
-SET @CheckName = 'vw_sales — required fields not null';
+      on every row. NULL values in these columns would break
+      fact table aggregations downstream.
+=============================================================*/
+
+SET @CheckName = 'clean_sales — required fields not null';
 
 SELECT @BadRows = COUNT(*)
-FROM clean.vw_sales
+FROM clean.clean_sales
 WHERE DateKey     IS NULL
    OR SalesAmount IS NULL
    OR UnitsSold   IS NULL;
@@ -147,19 +147,22 @@ ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 3: DELIVERY REQUIRED FIELDS
   Purpose:
-      Ensure key delivery identifiers are populated on every
-      row that passed the view filter.
-==============================================================*/
-SET @CheckName = 'vw_deliveries — required fields not null';
+      Ensure key delivery identifiers and dates are populated.
+      DriverID is excluded -- the view guarantees 'Unknown'
+      not NULL, so a null check would always pass vacuously.
+=============================================================*/
+
+SET @CheckName = 'clean_deliveries — required fields not null';
 
 SELECT @BadRows = COUNT(*)
-FROM clean.vw_deliveries
-WHERE DeliveryID IS NULL
-   OR RouteID    IS NULL
-   OR DriverID   IS NULL;
+FROM clean.clean_deliveries
+WHERE DeliveryID     IS NULL
+   OR RouteID        IS NULL
+   OR DeliveryDate   IS NULL
+   OR DeliveryStatus IS NULL;
 
 IF @BadRows > 0
 BEGIN
@@ -170,20 +173,23 @@ ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
-  CHECK 4: LATE DELIVERY BUSINESS RULE
+/*=============================================================
+  CHECK 4: ISLATE FLAG — LATE AND EXCEPTION DELIVERIES
   Purpose:
-      Ensure every delivery where DeliveryDate > ExpectedDeliveryDate
-      has DeliveryStatus = 'LATE'.
-      IMPORTANT: compare against 'LATE' (all caps) — that is the
-      exact value produced by vw_deliveries.
-==============================================================*/
-SET @CheckName = 'vw_deliveries — late delivery flag is LATE';
+      Every delivery with DeliveryStatus of 'Late' or
+      'Exception' must have IsLate = 1. Any row returned
+      here means the binary flag was not set correctly.
+
+      IMPORTANT: DeliveryStatus values use mixed case exactly
+      as they appear in staging -- 'Late' not 'LATE'.
+=============================================================*/
+
+SET @CheckName = 'clean_deliveries — IsLate = 1 for Late and Exception rows';
 
 SELECT @BadRows = COUNT(*)
-FROM clean.vw_deliveries
-WHERE DeliveryDate > ExpectedDeliveryDate
-  AND DeliveryStatus <> 'LATE';
+FROM clean.clean_deliveries
+WHERE DeliveryStatus IN ('Late', 'Exception')
+  AND IsLate <> 1;
 
 IF @BadRows > 0
 BEGIN
@@ -194,16 +200,43 @@ ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
-  CHECK 5: PRIORITY FLAG NORMALIZATION
+/*=============================================================
+  CHECK 5: ISLATE FLAG — ON-TIME DELIVERIES
   Purpose:
-      Ensure PriorityFlag contains only 0 or 1 after
-      normalization in vw_deliveries.
-==============================================================*/
-SET @CheckName = 'vw_deliveries — PriorityFlag is 0 or 1';
+      Every delivery with DeliveryStatus 'On-Time' must have
+      IsLate = 0. This check catches false positives that
+      Check 4 cannot -- a row flagged as late when it should
+      not be.
+=============================================================*/
+
+SET @CheckName = 'clean_deliveries — IsLate = 0 for On-Time rows';
 
 SELECT @BadRows = COUNT(*)
-FROM clean.vw_deliveries
+FROM clean.clean_deliveries
+WHERE DeliveryStatus = 'On-Time'
+  AND IsLate <> 0;
+
+IF @BadRows > 0
+BEGIN
+    PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR);
+    SET @FailureCount += 1;
+END
+ELSE
+    PRINT 'PASS: ' + @CheckName;
+
+
+/*=============================================================
+  CHECK 6: PRIORITYFLAG NORMALIZATION
+  Purpose:
+      PriorityFlag must contain only 0 or 1 after loading
+      from the BIT source column. Any other value indicates
+      a type conversion issue during the Python load.
+=============================================================*/
+
+SET @CheckName = 'clean_deliveries — PriorityFlag is 0 or 1';
+
+SELECT @BadRows = COUNT(*)
+FROM clean.clean_deliveries
 WHERE PriorityFlag NOT IN (0, 1);
 
 IF @BadRows > 0
@@ -215,28 +248,80 @@ ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
-  CHECK 6: ROUTE HOURS VALIDITY (CHECKED AGAINST STAGING)
+/*=============================================================
+  CHECK 7: ISRESOLVED FLAG ACCURACY
   Purpose:
-      Verify that no routes with zero or negative hours exist
-      in the source data BEFORE the view filter removes them.
-      Querying vw_routes for this condition would always return
-      0 because the view already excludes those rows — a
-      vacuous pass that guards nothing.
+      Every exception with a populated ResolvedDate must have
+      IsResolved = 1. Rows returned here mean the binary flag
+      was not set correctly by the clean layer view.
+=============================================================*/
 
-      A non-zero count here means bad source rows were silently
-      dropped by the view filter and were never investigated.
-      Decide whether to treat this as a hard failure or an
-      informational warning based on your data SLA.
-==============================================================*/
-SET @CheckName = 'staging_routes — invalid hours in source data';
+SET @CheckName = 'clean_exceptions — IsResolved = 1 where ResolvedDate is populated';
+
+SELECT @BadRows = COUNT(*)
+FROM clean.clean_exceptions
+WHERE ResolvedDate IS NOT NULL
+  AND IsResolved <> 1;
+
+IF @BadRows > 0
+BEGIN
+    PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR);
+    SET @FailureCount += 1;
+END
+ELSE
+    PRINT 'PASS: ' + @CheckName;
+
+
+/*=============================================================
+  CHECK 8: TRUNCATION CHECK
+  Purpose:
+      Confirm that no abbreviated values remain in the clean
+      layer after transformation. The clean layer views expand
+      all truncated values (e.g. 'L.' -> 'Large Package').
+      Any row returned here means a mapping was missed.
+=============================================================*/
+
+SET @CheckName = 'clean layer — no truncated values remain';
+
+SELECT @BadRows =
+    (SELECT COUNT(*) FROM clean.clean_sales      WHERE ProductType   LIKE '_.')
+  + (SELECT COUNT(*) FROM clean.clean_sales      WHERE Region        LIKE '_.')
+  + (SELECT COUNT(*) FROM clean.clean_deliveries WHERE ShipmentType  LIKE '_.')
+  + (SELECT COUNT(*) FROM clean.clean_deliveries WHERE Region        LIKE '_.')
+  + (SELECT COUNT(*) FROM clean.clean_exceptions WHERE ExceptionType LIKE '_.')
+  + (SELECT COUNT(*) FROM clean.clean_routes     WHERE Region        LIKE '_.');
+
+IF @BadRows > 0
+BEGIN
+    PRINT 'FAIL: ' + @CheckName + ' | Truncated value rows = ' + CAST(@BadRows AS VARCHAR);
+    SET @FailureCount += 1;
+END
+ELSE
+    PRINT 'PASS: ' + @CheckName;
+
+
+/*=============================================================
+  CHECK 9: ROUTE SOURCE DATA VALIDITY
+  Purpose:
+      Verify that no routes with zero or negative stops/hours
+      exist in staging before the clean layer view processes
+      them. Checking clean_routes for this condition would
+      always return 0 if the view filters those rows out --
+      a vacuous pass that guards nothing. Querying staging
+      directly ensures bad source rows are flagged even if
+      the view silently dropped them.
+=============================================================*/
+
+SET @CheckName = 'staging_routes — no invalid stops or hours in source data';
 
 SELECT @BadRows = COUNT(*)
 FROM staging.staging_routes
 WHERE RouteID  IS NOT NULL
   AND DriverID IS NOT NULL
-  AND (PlannedHours <= 0 OR ActualHours <= 0
-       OR PlannedStops <= 0 OR ActualStops <= 0);
+  AND (   PlannedStops <= 0
+       OR ActualStops  <= 0
+       OR PlannedHours <= 0
+       OR ActualHours  <= 0);
 
 IF @BadRows > 0
 BEGIN
@@ -247,20 +332,21 @@ ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
-  CHECK 7: REFERENTIAL INTEGRITY — vw_sales.DeliveryID
+/*=============================================================
+  CHECK 10: REFERENTIAL INTEGRITY — clean_sales.DeliveryID
   Purpose:
-      Every DeliveryID in vw_sales must have a matching row
-      in vw_deliveries. Orphaned IDs cause silent row loss
-      during DW fact table joins.
-==============================================================*/
-SET @CheckName = 'vw_sales — DeliveryID exists in vw_deliveries';
+      Every DeliveryID in clean_sales must have a matching
+      row in clean_deliveries. Orphaned DeliveryIDs cause
+      silent row loss during DW fact table joins.
+=============================================================*/
+
+SET @CheckName = 'clean_sales — DeliveryID exists in clean_deliveries';
 
 SELECT @BadRows = COUNT(*)
-FROM clean.vw_sales s
+FROM clean.clean_sales s
 WHERE NOT EXISTS (
     SELECT 1
-    FROM clean.vw_deliveries d
+    FROM clean.clean_deliveries d
     WHERE d.DeliveryID = s.DeliveryID
 );
 
@@ -273,19 +359,20 @@ ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
-  CHECK 8: REFERENTIAL INTEGRITY — vw_exceptions.DeliveryID
+/*=============================================================
+  CHECK 11: REFERENTIAL INTEGRITY — clean_exceptions.DeliveryID
   Purpose:
-      Every DeliveryID in vw_exceptions must have a matching
-      row in vw_deliveries. Same orphan risk as Check 7.
-==============================================================*/
-SET @CheckName = 'vw_exceptions — DeliveryID exists in vw_deliveries';
+      Every DeliveryID in clean_exceptions must have a matching
+      row in clean_deliveries. Same orphan risk as Check 10.
+=============================================================*/
+
+SET @CheckName = 'clean_exceptions — DeliveryID exists in clean_deliveries';
 
 SELECT @BadRows = COUNT(*)
-FROM clean.vw_exceptions e
+FROM clean.clean_exceptions e
 WHERE NOT EXISTS (
     SELECT 1
-    FROM clean.vw_deliveries d
+    FROM clean.clean_deliveries d
     WHERE d.DeliveryID = e.DeliveryID
 );
 
@@ -298,20 +385,25 @@ ELSE
     PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
+/*=============================================================
   FINAL PIPELINE DECISION
   Purpose:
       Halt the pipeline if any check failed. The THROW will
       propagate to the calling SQL Agent job step or
-      orchestration layer and cancel the DW load.
-==============================================================*/
+      orchestration layer and cancel the DW load. All 11
+      checks must pass before the DW load is permitted.
+=============================================================*/
+
 IF @FailureCount > 0
 BEGIN
-    PRINT '===== CLEAN VALIDATION FAILED: ' + CAST(@FailureCount AS VARCHAR) + ' check(s) failed =====';
+    PRINT '===== CLEAN VALIDATION FAILED: '
+        + CAST(@FailureCount AS VARCHAR)
+        + ' of 11 check(s) failed -- DW Load Cancelled =====';
     THROW 51000, 'Clean Layer Validation Failed. DW Load Cancelled.', 1;
 END
 ELSE
 BEGIN
-    PRINT '===== CLEAN VALIDATION PASSED — all ' +
-          CAST(8 AS VARCHAR) + ' checks passed =====';
+    PRINT '===== CLEAN VALIDATION PASSED — all 11 checks passed =====';
+    PRINT 'Pipeline cleared to proceed with DW load.';
 END;
+GO
