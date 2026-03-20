@@ -1,12 +1,12 @@
 ﻿/*=============================================================
   ETL STAGING SETUP
   Database: Fedex_Ops_Database
-  Version:  2.0
+  Version:  3.0
 
   Purpose:
       1. Create the four pipeline schemas if they do not exist.
       2. Create staging tables if they do not exist.
-      3. Bulk-insert raw CSV data into staging tables.
+      3. Create load_log metadata table if it does not exist.
       4. Print an object summary confirming setup is complete.
 
   Pipeline Layers:
@@ -15,38 +15,16 @@
       dw        -> star schema (fact & dimension tables)
       reporting -> aggregated BI views
 
-  Change Log:
-      v2.0 - Replaced dynamic SQL schema loop with four
-             individual IF NOT EXISTS / EXEC blocks.
-             CREATE SCHEMA must be the first statement in a
-             batch; the loop pattern works but is brittle and
-             harder to read than four explicit blocks.
-           - Added composite primary key (RouteID, DriverID)
-             to staging_routes. The original had no PK, which
-             allowed duplicate rows to load silently and
-             corrupt downstream aggregations.
-           - Fixed copy/paste comment on staging_routes:
-             was "Raw delivery exceptions data", corrected to
-             "Raw route performance data".
-           - Changed ResolutionTimeHours from INT to
-             DECIMAL(6,2) so fractional hours (e.g. 1.5) are
-             not silently rounded.
-           - Added NOT NULL constraints on all required
-             identifier and date columns to document intent
-             and catch upstream data problems early.
-           - Added MAXERRORS = 0 and ERRORFILE to every BULK
-             INSERT so a single bad row produces a diagnostic
-             file instead of silently aborting the load.
-           - Added CODEPAGE = '65001' (UTF-8) to every BULK
-             INSERT to prevent silent encoding corruption for
-             non-ASCII characters (e.g. driver names).
-           - Wrapped all four BULK INSERTs + TRUNCATEs in a
-             single transaction so a partial load failure
-             rolls back all tables, leaving staging in a
-             consistent all-or-nothing state.
-           - Updated BULK INSERT paths to use a configurable
-             variable (@DataPath) so the script does not need
-             to be edited when run from a different machine.
+  Data Loading:
+      CSV data is loaded into staging tables via load_staging.py.
+      Run that script after this one to populate the tables.
+      load_staging.py location: C:\ETL_DATA\load_staging.py
+
+  Validation:
+      Run staging_layer_validation_v2.sql after each load to
+      confirm data landed correctly before proceeding to the
+      clean layer.
+
 =============================================================*/
 
 USE Fedex_Ops_Database;
@@ -87,25 +65,28 @@ GO
   this script is safe to re-run without data loss.
 
   NOT NULL is declared explicitly on all required columns.
-  Columns that are legitimately nullable (e.g. ResolvedDate
-  for open exceptions) are marked NULL explicitly for clarity.
+  Columns that are legitimately nullable are marked NULL
+  explicitly for clarity.
 =============================================================*/
 
 -- -----------------------------------------------------------
 -- STAGING TABLE: DELIVERIES
 -- Raw delivery records: route, driver, timing, status.
+-- DriverID is NULL: ~1,010 empty values exist in source CSV.
+-- DeliveryDate / ExpectedDeliveryDate are DATETIME2: source
+-- CSV includes full timestamps e.g. 2024-09-08 02:05:35.
 -- -----------------------------------------------------------
 IF OBJECT_ID('staging.staging_deliveries', 'U') IS NULL
 BEGIN
     CREATE TABLE staging.staging_deliveries (
         DeliveryID           INT          NOT NULL PRIMARY KEY,
         RouteID              NVARCHAR(10) NOT NULL,
-        DriverID             NVARCHAR(50) NOT NULL,
+        DriverID             NVARCHAR(50) NULL,           -- NULL: empty values in source
         Region               NVARCHAR(10) NOT NULL,
         ShipmentType         NVARCHAR(20) NOT NULL,
-        DeliveryDate         DATE         NOT NULL,
-        ExpectedDeliveryDate DATE         NULL,      -- Planned date; NULL if not scheduled
-        DeliveryStatus       NVARCHAR(20) NOT NULL,  -- Delivered, Delayed, Failed
+        DeliveryDate         DATETIME2    NOT NULL,       -- DATETIME2: source has timestamps
+        ExpectedDeliveryDate DATETIME2    NULL,           -- NULL if not scheduled
+        DeliveryStatus       NVARCHAR(20) NOT NULL,       -- On-Time, Late, Exception
         PriorityFlag         BIT          NOT NULL
     );
     PRINT 'Table created: staging.staging_deliveries';
@@ -118,18 +99,20 @@ GO
 -- STAGING TABLE: DELIVERY EXCEPTIONS
 -- Operational issues affecting deliveries (delays, damage,
 -- weather events, etc.).
+-- DateReported / ResolvedDate are DATETIME2: source CSV
+-- includes full timestamps e.g. 2024-02-09 04:17:37.
 -- -----------------------------------------------------------
 IF OBJECT_ID('staging.staging_exceptions', 'U') IS NULL
 BEGIN
     CREATE TABLE staging.staging_exceptions (
-        ExceptionID          INT          NOT NULL PRIMARY KEY,
-        DeliveryID           INT          NOT NULL,
-        ExceptionType        NVARCHAR(50) NOT NULL,  -- Delay, Damage, Weather, etc.
-        DateReported         DATE         NOT NULL,
-        ResolvedDate         DATE         NULL,       -- NULL = exception still open
-        ResolutionTimeHours  DECIMAL(6,2) NULL,       -- DECIMAL allows fractional hours
-        PriorityFlag         BIT          NOT NULL,
-        Region               NVARCHAR(10) NOT NULL
+        ExceptionID         INT          NOT NULL PRIMARY KEY,
+        DeliveryID          INT          NOT NULL,
+        ExceptionType       NVARCHAR(50) NOT NULL,        -- Delay, Damage, Weather, etc.
+        DateReported        DATETIME2    NOT NULL,        -- DATETIME2: source has timestamps
+        ResolvedDate        DATETIME2    NULL,            -- NULL = exception still open
+        ResolutionTimeHours DECIMAL(6,2) NULL,            -- NULL if unresolved
+        PriorityFlag        BIT          NOT NULL,
+        Region              NVARCHAR(10) NOT NULL
     );
     PRINT 'Table created: staging.staging_exceptions';
 END
@@ -145,13 +128,13 @@ GO
 IF OBJECT_ID('staging.staging_routes', 'U') IS NULL
 BEGIN
     CREATE TABLE staging.staging_routes (
-        RouteID       NVARCHAR(10)   NOT NULL,
-        DriverID      NVARCHAR(50)   NOT NULL,
-        PlannedStops  INT            NOT NULL,
-        ActualStops   INT            NOT NULL,
-        PlannedHours  DECIMAL(5,2)   NOT NULL,
-        ActualHours   DECIMAL(5,2)   NOT NULL,
-        Region        NVARCHAR(10)   NOT NULL,
+        RouteID      NVARCHAR(10) NOT NULL,
+        DriverID     NVARCHAR(50) NULL,
+        PlannedStops INT          NOT NULL,
+        ActualStops  INT          NOT NULL,
+        PlannedHours DECIMAL(5,2) NOT NULL,
+        ActualHours  DECIMAL(5,2) NOT NULL,
+        Region       NVARCHAR(10) NOT NULL,
         -- Composite PK prevents duplicate route+driver rows from
         -- loading silently and causing double-counting downstream.
         CONSTRAINT PK_staging_routes PRIMARY KEY (RouteID, DriverID)
@@ -165,17 +148,19 @@ GO
 -- -----------------------------------------------------------
 -- STAGING TABLE: SALES
 -- Raw sales transactions tied to deliveries.
+-- DateKey is DATETIME2: source CSV includes full timestamps
+-- e.g. 2025-03-11 09:37:19.
 -- -----------------------------------------------------------
 IF OBJECT_ID('staging.staging_sales', 'U') IS NULL
 BEGIN
     CREATE TABLE staging.staging_sales (
-        SalesID      INT             NOT NULL PRIMARY KEY,
-        DeliveryID   INT             NOT NULL,
-        DateKey      DATE            NOT NULL,
-        ProductType  NVARCHAR(50)    NOT NULL,
-        Region       NVARCHAR(10)    NOT NULL,
-        UnitsSold    INT             NOT NULL,
-        SalesAmount  DECIMAL(10,2)   NOT NULL
+        SalesID     INT           NOT NULL PRIMARY KEY,
+        DeliveryID  INT           NOT NULL,
+        DateKey     DATETIME2     NOT NULL,               -- DATETIME2: source has timestamps
+        ProductType NVARCHAR(50)  NOT NULL,
+        Region      NVARCHAR(10)  NOT NULL,
+        UnitsSold   INT           NOT NULL,
+        SalesAmount DECIMAL(10,2) NOT NULL
     );
     PRINT 'Table created: staging.staging_sales';
 END
@@ -183,177 +168,29 @@ ELSE
     PRINT 'Table already exists: staging.staging_sales';
 GO
 
-
-/*=============================================================
-  STEP 3: BULK INSERT CSV DATA INTO STAGING TABLES
-
-  CONFIGURATION
-  -------------
-  Set @DataPath to the folder containing the four CSV files.
-  Use a trailing backslash. The script appends the filename.
-
-  Example (local dev):
-      SET @DataPath = 'C:\Operational-Analytics-Data-Warehouse\datasets\raw\';
-
-  Error files are written to the same folder with an _errors
-  suffix. MAXERRORS = 0 means any bad row aborts the load and
-  writes a diagnostic file — do not change this to a higher
-  value without understanding the data quality implications.
-
-  TRANSACTION SAFETY
-  ------------------
-  All four TRUNCATE + BULK INSERT operations run inside a
-  single transaction. If any load fails, all four tables are
-  rolled back so staging is never left in a partial state.
-=============================================================*/
-
-DECLARE @DataPath NVARCHAR(500);
-
--- *** UPDATE THIS PATH BEFORE RUNNING ***
-SET @DataPath = 'C:\Operational-Analytics-Data-Warehouse\datasets\raw\';
-
--- ---------------------
--- Build full file paths
--- ---------------------
-DECLARE @SalesFile      NVARCHAR(500) = @DataPath + 'sales.csv';
-DECLARE @DeliveriesFile NVARCHAR(500) = @DataPath + 'deliveries.csv';
-DECLARE @RoutesFile     NVARCHAR(500) = @DataPath + 'routes.csv';
-DECLARE @ExceptionsFile NVARCHAR(500) = @DataPath + 'exceptions.csv';
-
-DECLARE @SalesErr       NVARCHAR(500) = @DataPath + 'sales_errors.txt';
-DECLARE @DeliveriesErr  NVARCHAR(500) = @DataPath + 'deliveries_errors.txt';
-DECLARE @RoutesErr      NVARCHAR(500) = @DataPath + 'routes_errors.txt';
-DECLARE @ExceptionsErr  NVARCHAR(500) = @DataPath + 'exceptions_errors.txt';
-
-DECLARE @SQL NVARCHAR(MAX);
-
-BEGIN TRANSACTION;
-BEGIN TRY
-
-    -- -------------------------------------------------------
-    -- SALES
-    -- -------------------------------------------------------
-    TRUNCATE TABLE staging.staging_sales;
-
-    SET @SQL = '
-    BULK INSERT staging.staging_sales
-    FROM ''' + @SalesFile + '''
-    WITH (
-        FIRSTROW        = 2,
-        FIELDTERMINATOR = '','',
-        ROWTERMINATOR   = ''\n'',
-        CODEPAGE        = ''65001'',
-        MAXERRORS       = 0,
-        ERRORFILE       = ''' + @SalesErr + ''',
-        TABLOCK
-    );';
-    EXEC(@SQL);
-    PRINT 'Loaded: staging.staging_sales';
-
-    -- -------------------------------------------------------
-    -- DELIVERIES
-    -- -------------------------------------------------------
-    TRUNCATE TABLE staging.staging_deliveries;
-
-    SET @SQL = '
-    BULK INSERT staging.staging_deliveries
-    FROM ''' + @DeliveriesFile + '''
-    WITH (
-        FIRSTROW        = 2,
-        FIELDTERMINATOR = '','',
-        ROWTERMINATOR   = ''\n'',
-        CODEPAGE        = ''65001'',
-        MAXERRORS       = 0,
-        ERRORFILE       = ''' + @DeliveriesErr + ''',
-        TABLOCK
-    );';
-    EXEC(@SQL);
-    PRINT 'Loaded: staging.staging_deliveries';
-
-    -- -------------------------------------------------------
-    -- ROUTES
-    -- -------------------------------------------------------
-    TRUNCATE TABLE staging.staging_routes;
-
-    SET @SQL = '
-    BULK INSERT staging.staging_routes
-    FROM ''' + @RoutesFile + '''
-    WITH (
-        FIRSTROW        = 2,
-        FIELDTERMINATOR = '','',
-        ROWTERMINATOR   = ''\n'',
-        CODEPAGE        = ''65001'',
-        MAXERRORS       = 0,
-        ERRORFILE       = ''' + @RoutesErr + ''',
-        TABLOCK
-    );';
-    EXEC(@SQL);
-    PRINT 'Loaded: staging.staging_routes';
-
-    -- -------------------------------------------------------
-    -- EXCEPTIONS
-    -- -------------------------------------------------------
-    TRUNCATE TABLE staging.staging_exceptions;
-
-    SET @SQL = '
-    BULK INSERT staging.staging_exceptions
-    FROM ''' + @ExceptionsFile + '''
-    WITH (
-        FIRSTROW        = 2,
-        FIELDTERMINATOR = '','',
-        ROWTERMINATOR   = ''\n'',
-        CODEPAGE        = ''65001'',
-        MAXERRORS       = 0,
-        ERRORFILE       = ''' + @ExceptionsErr + ''',
-        TABLOCK
-    );';
-    EXEC(@SQL);
-    PRINT 'Loaded: staging.staging_exceptions';
-
-    COMMIT TRANSACTION;
-    PRINT 'All CSV data loaded into staging tables successfully.';
-
-END TRY
-BEGIN CATCH
-    ROLLBACK TRANSACTION;
-    PRINT 'BULK INSERT failed. All staging tables have been rolled back.';
-    PRINT 'Error: ' + ERROR_MESSAGE();
-    THROW;
-END CATCH;
-GO
-
-/*=============================================================
-  OPTION 2: TRANSFER DBO TABLES INTO STAGING SCHEMA
-  Use this block instead of BULK INSERT if raw data was
-  imported directly into dbo (common with SSMS import wizard).
-  Uncomment and run after verifying table names.
-=============================================================*/
-/*
-DECLARE @Tables TABLE (TableName NVARCHAR(100));
-
-INSERT INTO @Tables VALUES
-    ('staging_sales'),
-    ('staging_deliveries'),
-    ('staging_routes'),
-    ('staging_exceptions');
-
-DECLARE @TransferSQL NVARCHAR(MAX) = '';
-
-SELECT @TransferSQL = @TransferSQL + '
-IF OBJECT_ID(''dbo.' + TableName + ''', ''U'') IS NOT NULL
+-- -----------------------------------------------------------
+-- METADATA TABLE: LOAD LOG
+-- Records row counts and timestamps from each
+-- load_staging.py run. Used by the validation script for
+-- dynamic row count checks instead of hardcoded values.
+-- Rows are never deleted -- full load history is retained.
+-- -----------------------------------------------------------
+IF OBJECT_ID('staging.load_log', 'U') IS NULL
 BEGIN
-    ALTER SCHEMA staging TRANSFER dbo.' + TableName + ';
-    PRINT ''Transferred: ' + TableName + ''';
-END'
-FROM @Tables;
-
-EXEC(@TransferSQL);
+    CREATE TABLE staging.load_log (
+        LoadID      INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        TableName   NVARCHAR(100)     NOT NULL,
+        RowsLoaded  INT               NOT NULL,
+        LoadedAt    DATETIME2         NOT NULL DEFAULT GETDATE()
+    );
+    PRINT 'Table created: staging.load_log';
+END
+ELSE
+    PRINT 'Table already exists: staging.load_log';
 GO
-*/
-
 
 /*=============================================================
-  STEP 4: ETL SCHEMA OBJECT SUMMARY
+  STEP 3: ETL SCHEMA OBJECT SUMMARY
   Quick post-setup report confirming tables and views exist
   in each pipeline layer.
 =============================================================*/

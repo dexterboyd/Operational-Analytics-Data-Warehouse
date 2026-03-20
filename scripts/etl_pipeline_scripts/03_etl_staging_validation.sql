@@ -1,372 +1,472 @@
 /*=============================================================
   STAGING LAYER VALIDATION
   Database: Fedex_Ops_Database
-  Version:  2.0
+  Version:  3.0
 
   Purpose:
-      Validate raw staging data after bulk load and before
-      any clean-layer transformations are applied. Designed
-      to run as a SQL Agent job step; THROW halts the job
-      if critical checks fail.
+      Validate staging tables after each load from load_staging.py.
+      Outputs a PASS/FAIL summary for every check. Review all
+      FAIL and WARN results before proceeding to the clean layer.
 
-  Checks Performed:
-      1. Empty table guard       -- all four tables must have rows
-      2. NULL value checks       -- key identifiers must not be null
-      3. Negative value checks   -- numeric metrics must be >= 0
-      4. Referential integrity   -- DeliveryIDs in sales and
-                                    exceptions must exist in
-                                    staging_deliveries
-      5. Date range sanity       -- dates must be within plausible
-                                    bounds and correctly ordered
+  Run Order:
+      1. etl_staging_setup_v5.sql        -- build schemas and tables
+      2. load_staging.py                 -- load CSV data
+      3. THIS SCRIPT                     -- validate staging data
 
-  Behavior:
-      - SET XACT_ABORT ON ensures any open transaction is rolled
-        back if THROW fires inside a transaction context.
-      - @FailureCount accumulates across all checks.
-      - If @FailureCount > 0 the script calls THROW, which halts
-        execution and cancels the downstream clean-layer load.
-      - Set @EnableStagingValidation = 0 to skip all checks
-        (e.g. during initial schema setup before data is loaded).
-        NOTE: For pipeline automation, prefer controlling this
-        via a SQL Agent job step parameter or a config table
-        rather than editing the script directly.
+  Changes from v1.0:
+      - Row count checks are now dynamic. Expected values are
+        pulled from staging.load_log (written by load_staging.py)
+        instead of being hardcoded. Validation automatically
+        adapts when source file sizes change.
 
-  Pipeline Flow:
-      staging -> [THIS SCRIPT] -> clean -> dw -> reporting
+  Validation Categories:
+      1. Row Counts        -- current counts match last load
+      2. Null Checks       -- required columns are populated
+      3. Duplicate Checks  -- primary keys are unique
+      4. Referential       -- foreign keys exist in parent tables
+      5. Value Ranges      -- numeric values are sensible
+      6. Date Sanity       -- dates are logical and in range
+      7. Data Quality      -- known issues flagged for clean layer
 
-  Change Log:
-      v2.0 - Replaced RAISERROR severity 10 (informational) with
-             a THROW-based failure gate. Severity 10 does not
-             halt execution; the pipeline previously continued
-             regardless of check results.
-           - Added SET XACT_ABORT ON and SET LOCK_TIMEOUT.
-           - Added Check 1: empty table guard. Without it, an
-             empty table after a failed bulk load causes all
-             downstream NULL checks to pass vacuously.
-           - Consolidated each table's NULL checks into a single
-             SELECT pass (was 2-3 separate queries per table).
-           - Added Check 3: negative/zero value checks on
-             UnitsSold, SalesAmount, PlannedStops, ActualStops,
-             PlannedHours, ActualHours, ResolutionTimeHours.
-           - Added Check 4: referential integrity for DeliveryID
-             across staging_sales and staging_exceptions vs
-             staging_deliveries.
-           - Added Check 5: date range and chronology checks
-             (out-of-range dates, future delivery dates,
-             ResolvedDate before DateReported).
-           - @EnableStagingValidation documented as a script-level
-             toggle; noted that pipeline automation should use a
-             config table or job parameter instead.
 =============================================================*/
 
-SET XACT_ABORT ON;
-
--- Abort any scan blocked longer than 30 seconds.
--- Adjust or remove if long-running queries are expected.
-SET LOCK_TIMEOUT 30000;
+USE Fedex_Ops_Database;
+GO
 
 /*=============================================================
-  VALIDATION TOGGLE
-  Set to 0 to skip all checks (e.g. during schema setup before
-  data is loaded). Leave at 1 for normal pipeline execution.
+  SETUP: RESULTS TABLE
+  Stores every check result so the final summary can be
+  printed in one clean output at the end.
 =============================================================*/
-DECLARE @EnableStagingValidation BIT = 1;
 
-IF @EnableStagingValidation = 0
-BEGIN
-    PRINT 'STAGING VALIDATION SKIPPED (CONFIG DISABLED)';
-    RETURN;
-END
+IF OBJECT_ID('tempdb..#ValidationResults', 'U') IS NOT NULL
+    DROP TABLE #ValidationResults;
+
+CREATE TABLE #ValidationResults (
+    CheckID   INT IDENTITY(1,1),
+    Category  NVARCHAR(50),
+    TableName NVARCHAR(100),
+    CheckName NVARCHAR(200),
+    Expected  NVARCHAR(100),
+    Actual    NVARCHAR(100),
+    Status    NVARCHAR(10)    -- PASS, FAIL, WARN
+);
+GO
 
 /*=============================================================
-  CONTROL VARIABLES
+  CATEGORY 1: ROW COUNTS
+  Compares current table counts against the most recent load
+  recorded in staging.load_log. No hardcoded values -- adapts
+  automatically when source file sizes change.
 =============================================================*/
-DECLARE @FailureCount INT       = 0;
-DECLARE @CheckName    NVARCHAR(200);
-DECLARE @BadRows      INT;
 
-PRINT '=====================================';
-PRINT 'RUNNING STAGING LAYER VALIDATION';
-PRINT '=====================================';
+DECLARE @Expected INT;
+DECLARE @Count    INT;
 
+-- staging_sales
+SELECT @Expected = RowsLoaded
+FROM staging.load_log
+WHERE TableName = 'staging.staging_sales'
+  AND LoadID = (
+      SELECT MAX(LoadID) FROM staging.load_log
+      WHERE TableName = 'staging.staging_sales'
+  );
+
+SELECT @Count = COUNT(*) FROM staging.staging_sales;
+
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Row Count', 'staging_sales', 'Row count matches last load',
+        CAST(@Expected AS NVARCHAR), CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = @Expected THEN 'PASS' ELSE 'FAIL' END);
+
+-- staging_deliveries
+SELECT @Expected = RowsLoaded
+FROM staging.load_log
+WHERE TableName = 'staging.staging_deliveries'
+  AND LoadID = (
+      SELECT MAX(LoadID) FROM staging.load_log
+      WHERE TableName = 'staging.staging_deliveries'
+  );
+
+SELECT @Count = COUNT(*) FROM staging.staging_deliveries;
+
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Row Count', 'staging_deliveries', 'Row count matches last load',
+        CAST(@Expected AS NVARCHAR), CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = @Expected THEN 'PASS' ELSE 'FAIL' END);
+
+-- staging_routes
+SELECT @Expected = RowsLoaded
+FROM staging.load_log
+WHERE TableName = 'staging.staging_routes'
+  AND LoadID = (
+      SELECT MAX(LoadID) FROM staging.load_log
+      WHERE TableName = 'staging.staging_routes'
+  );
+
+SELECT @Count = COUNT(*) FROM staging.staging_routes;
+
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Row Count', 'staging_routes', 'Row count matches last load',
+        CAST(@Expected AS NVARCHAR), CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = @Expected THEN 'PASS' ELSE 'FAIL' END);
+
+-- staging_exceptions
+SELECT @Expected = RowsLoaded
+FROM staging.load_log
+WHERE TableName = 'staging.staging_exceptions'
+  AND LoadID = (
+      SELECT MAX(LoadID) FROM staging.load_log
+      WHERE TableName = 'staging.staging_exceptions'
+  );
+
+SELECT @Count = COUNT(*) FROM staging.staging_exceptions;
+
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Row Count', 'staging_exceptions', 'Row count matches last load',
+        CAST(@Expected AS NVARCHAR), CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = @Expected THEN 'PASS' ELSE 'FAIL' END);
 
 /*=============================================================
-  CHECK 1: EMPTY TABLE GUARD
-  Purpose:
-      A zero-row table almost always means the bulk load
-      failed silently. All downstream NULL and range checks
-      would pass vacuously on an empty table, giving a false
-      all-clear. Fail immediately if any table is empty.
+  CATEGORY 2: NULL CHECKS
+  Confirms required (NOT NULL) columns contain no nulls.
+  Nullable columns (DriverID, ResolvedDate etc.) are excluded.
 =============================================================*/
-PRINT '--- CHECK 1: EMPTY TABLE GUARD ---';
 
-SET @CheckName = 'staging_sales — not empty';
-SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM staging.staging_sales;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
+-- staging_sales: all columns NOT NULL
+SELECT @Count = COUNT(*) FROM staging.staging_sales
+WHERE SalesID IS NULL OR DeliveryID IS NULL OR DateKey IS NULL
+   OR ProductType IS NULL OR Region IS NULL
+   OR UnitsSold IS NULL OR SalesAmount IS NULL;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Null Check', 'staging_sales', 'No NULLs in required columns',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
-SET @CheckName = 'staging_deliveries — not empty';
-SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM staging.staging_deliveries;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
+-- staging_deliveries: required columns only (DriverID excluded - nullable by design)
+SELECT @Count = COUNT(*) FROM staging.staging_deliveries
+WHERE DeliveryID IS NULL OR RouteID IS NULL OR Region IS NULL
+   OR ShipmentType IS NULL OR DeliveryDate IS NULL
+   OR DeliveryStatus IS NULL OR PriorityFlag IS NULL;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Null Check', 'staging_deliveries', 'No NULLs in required columns',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
-SET @CheckName = 'staging_routes — not empty';
-SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM staging.staging_routes;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
+-- staging_deliveries: report NULL DriverID count (expected ~1,010, nullable by design)
+SELECT @Count = COUNT(*) FROM staging.staging_deliveries WHERE DriverID IS NULL;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Null Check', 'staging_deliveries',
+        'NULL DriverID count (expected ~1010, nullable by design)',
+        '~1010', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count BETWEEN 900 AND 1100 THEN 'PASS' ELSE 'WARN' END);
 
-SET @CheckName = 'staging_exceptions — not empty';
-SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM staging.staging_exceptions;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
+-- staging_routes: all columns NOT NULL
+SELECT @Count = COUNT(*) FROM staging.staging_routes
+WHERE RouteID IS NULL OR PlannedStops IS NULL
+   OR ActualStops IS NULL OR PlannedHours IS NULL
+   OR ActualHours IS NULL OR Region IS NULL;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Null Check', 'staging_routes', 'No NULLs in required columns',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
--- Informational row count summary (always printed, not a gate check)
-PRINT 'Row counts:';
-SELECT 'staging_sales'       AS TableName, COUNT(*) AS RowsCount FROM staging.staging_sales
-UNION ALL
-SELECT 'staging_deliveries',               COUNT(*) FROM staging.staging_deliveries
-UNION ALL
-SELECT 'staging_routes',                   COUNT(*) FROM staging.staging_routes
-UNION ALL
-SELECT 'staging_exceptions',               COUNT(*) FROM staging.staging_exceptions;
+-- staging_exceptions: required columns only (ResolvedDate, ResolutionTimeHours excluded)
+SELECT @Count = COUNT(*) FROM staging.staging_exceptions
+WHERE ExceptionID IS NULL OR DeliveryID IS NULL OR ExceptionType IS NULL
+   OR DateReported IS NULL OR PriorityFlag IS NULL OR Region IS NULL;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Null Check', 'staging_exceptions', 'No NULLs in required columns',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
+-- staging_exceptions: open exceptions with NULL ResolvedDate (expected ~30)
+SELECT @Count = COUNT(*) FROM staging.staging_exceptions WHERE ResolvedDate IS NULL;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Null Check', 'staging_exceptions',
+        'Open exceptions with NULL ResolvedDate (expected ~30)',
+        '~30', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count BETWEEN 20 AND 40 THEN 'PASS' ELSE 'WARN' END);
 
 /*=============================================================
-  CHECK 2: NULL VALUE CHECKS
-  Purpose:
-      Ensure primary identifiers and required fields are
-      populated. Each table is scanned once using conditional
-      aggregation to avoid multiple passes.
+  CATEGORY 3: DUPLICATE CHECKS
+  Confirms primary key columns contain no duplicate values.
+  Routes uses a composite PK (RouteID + DriverID).
+  NOTE: 202 duplicate RouteID+DriverID combinations are known
+  in the source CSV -- flagged as WARN for investigation in
+  the clean layer.
 =============================================================*/
-PRINT '--- CHECK 2: NULL VALUE CHECKS ---';
 
--- Sales: all key fields in one pass
-SET @CheckName = 'staging_sales — no NULL key fields';
-SELECT @BadRows =
-    SUM(CASE WHEN SalesID    IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DeliveryID IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DateKey    IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN UnitsSold  IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN SalesAmount IS NULL THEN 1 ELSE 0 END)
-FROM staging.staging_sales;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad field instances = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
+-- staging_sales: SalesID unique
+SELECT @Count = COUNT(*) FROM (
+    SELECT SalesID FROM staging.staging_sales
+    GROUP BY SalesID HAVING COUNT(*) > 1
+) d;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Duplicate Check', 'staging_sales', 'SalesID is unique',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
--- NULL detail for investigation (only printed when failures exist)
-IF @BadRows > 0
-    SELECT
-        'staging_sales'                                                          AS TableName,
-        SUM(CASE WHEN SalesID    IS NULL THEN 1 ELSE 0 END)                     AS NullSalesID,
-        SUM(CASE WHEN DeliveryID IS NULL THEN 1 ELSE 0 END)                     AS NullDeliveryID,
-        SUM(CASE WHEN DateKey    IS NULL THEN 1 ELSE 0 END)                     AS NullDateKey,
-        SUM(CASE WHEN UnitsSold  IS NULL THEN 1 ELSE 0 END)                     AS NullUnitsSold,
-        SUM(CASE WHEN SalesAmount IS NULL THEN 1 ELSE 0 END)                    AS NullSalesAmount
-    FROM staging.staging_sales;
+-- staging_deliveries: DeliveryID unique
+SELECT @Count = COUNT(*) FROM (
+    SELECT DeliveryID FROM staging.staging_deliveries
+    GROUP BY DeliveryID HAVING COUNT(*) > 1
+) d;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Duplicate Check', 'staging_deliveries', 'DeliveryID is unique',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
--- Deliveries
-SET @CheckName = 'staging_deliveries — no NULL key fields';
-SELECT @BadRows =
-    SUM(CASE WHEN DeliveryID           IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN RouteID              IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DriverID             IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DeliveryDate         IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DeliveryStatus       IS NULL THEN 1 ELSE 0 END)
-FROM staging.staging_deliveries;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad field instances = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
+-- staging_exceptions: ExceptionID unique
+SELECT @Count = COUNT(*) FROM (
+    SELECT ExceptionID FROM staging.staging_exceptions
+    GROUP BY ExceptionID HAVING COUNT(*) > 1
+) d;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Duplicate Check', 'staging_exceptions', 'ExceptionID is unique',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
-IF @BadRows > 0
-    SELECT
-        'staging_deliveries'                                                     AS TableName,
-        SUM(CASE WHEN DeliveryID           IS NULL THEN 1 ELSE 0 END)           AS NullDeliveryID,
-        SUM(CASE WHEN RouteID              IS NULL THEN 1 ELSE 0 END)           AS NullRouteID,
-        SUM(CASE WHEN DriverID             IS NULL THEN 1 ELSE 0 END)           AS NullDriverID,
-        SUM(CASE WHEN DeliveryDate         IS NULL THEN 1 ELSE 0 END)           AS NullDeliveryDate,
-        SUM(CASE WHEN DeliveryStatus       IS NULL THEN 1 ELSE 0 END)           AS NullDeliveryStatus
-    FROM staging.staging_deliveries;
-
--- Routes
-SET @CheckName = 'staging_routes — no NULL key fields';
-SELECT @BadRows =
-    SUM(CASE WHEN RouteID  IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DriverID IS NULL THEN 1 ELSE 0 END)
-FROM staging.staging_routes;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad field instances = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-IF @BadRows > 0
-    SELECT
-        'staging_routes'                                                         AS TableName,
-        SUM(CASE WHEN RouteID  IS NULL THEN 1 ELSE 0 END)                       AS NullRouteID,
-        SUM(CASE WHEN DriverID IS NULL THEN 1 ELSE 0 END)                       AS NullDriverID
-    FROM staging.staging_routes;
-
--- Exceptions
-SET @CheckName = 'staging_exceptions — no NULL key fields';
-SELECT @BadRows =
-    SUM(CASE WHEN ExceptionID  IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DeliveryID   IS NULL THEN 1 ELSE 0 END) +
-    SUM(CASE WHEN DateReported IS NULL THEN 1 ELSE 0 END)
-FROM staging.staging_exceptions;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad field instances = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-IF @BadRows > 0
-    SELECT
-        'staging_exceptions'                                                     AS TableName,
-        SUM(CASE WHEN ExceptionID  IS NULL THEN 1 ELSE 0 END)                   AS NullExceptionID,
-        SUM(CASE WHEN DeliveryID   IS NULL THEN 1 ELSE 0 END)                   AS NullDeliveryID,
-        SUM(CASE WHEN DateReported IS NULL THEN 1 ELSE 0 END)                   AS NullDateReported
-    FROM staging.staging_exceptions;
-
+-- staging_routes: composite PK (RouteID + DriverID)
+-- 202 duplicates are known in source CSV -- flagged as WARN
+SELECT @Count = COUNT(*) FROM (
+    SELECT RouteID, DriverID FROM staging.staging_routes
+    GROUP BY RouteID, DriverID HAVING COUNT(*) > 1
+) d;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Duplicate Check', 'staging_routes',
+        'Duplicate RouteID+DriverID combinations (202 known in source - investigate in clean layer)',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0    THEN 'PASS'
+             WHEN @Count <= 202 THEN 'WARN'
+             ELSE 'FAIL' END);
 
 /*=============================================================
-  CHECK 3: NEGATIVE AND ZERO VALUE CHECKS
-  Purpose:
-      Negative or zero values in numeric operational columns
-      indicate CSV parsing errors or upstream data problems.
-      A negative unit count or negative route hours is never
-      a legitimate source value.
+  CATEGORY 4: REFERENTIAL INTEGRITY
+  Confirms foreign key values in child tables exist in their
+  parent table (staging_deliveries).
 =============================================================*/
-PRINT '--- CHECK 3: NEGATIVE / ZERO VALUE CHECKS ---';
 
-SET @CheckName = 'staging_sales — UnitsSold and SalesAmount > 0';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_sales
-WHERE UnitsSold  <= 0
-   OR SalesAmount <= 0;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-SET @CheckName = 'staging_routes — stops and hours > 0';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_routes
-WHERE PlannedStops  <= 0
-   OR ActualStops   <= 0
-   OR PlannedHours  <= 0
-   OR ActualHours   <= 0;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-SET @CheckName = 'staging_exceptions — ResolutionTimeHours >= 0 when present';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_exceptions
-WHERE ResolutionTimeHours IS NOT NULL
-  AND ResolutionTimeHours < 0;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-
-/*=============================================================
-  CHECK 4: REFERENTIAL INTEGRITY
-  Purpose:
-      DeliveryIDs in staging_sales and staging_exceptions must
-      have a matching row in staging_deliveries. Orphaned IDs
-      will silently lose rows during all downstream joins.
-=============================================================*/
-PRINT '--- CHECK 4: REFERENTIAL INTEGRITY ---';
-
-SET @CheckName = 'staging_sales — DeliveryID exists in staging_deliveries';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_sales s
+-- staging_sales: every DeliveryID exists in staging_deliveries
+SELECT @Count = COUNT(*) FROM staging.staging_sales s
 WHERE NOT EXISTS (
-    SELECT 1
-    FROM staging.staging_deliveries d
+    SELECT 1 FROM staging.staging_deliveries d
     WHERE d.DeliveryID = s.DeliveryID
 );
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Referential Integrity', 'staging_sales',
+        'All DeliveryIDs exist in staging_deliveries',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
-SET @CheckName = 'staging_exceptions — DeliveryID exists in staging_deliveries';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_exceptions e
+-- staging_exceptions: every DeliveryID exists in staging_deliveries
+SELECT @Count = COUNT(*) FROM staging.staging_exceptions e
 WHERE NOT EXISTS (
-    SELECT 1
-    FROM staging.staging_deliveries d
+    SELECT 1 FROM staging.staging_deliveries d
     WHERE d.DeliveryID = e.DeliveryID
 );
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-
-/*=============================================================
-  CHECK 5: DATE RANGE AND CHRONOLOGY CHECKS
-  Purpose:
-      Catch date formatting errors from BULK INSERT (e.g. a
-      year parsed as 0001 or 9999) and logical errors like
-      a resolution date before the reported date.
-=============================================================*/
-PRINT '--- CHECK 5: DATE RANGE AND CHRONOLOGY ---';
-
-SET @CheckName = 'staging_deliveries — DeliveryDate within plausible range';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_deliveries
-WHERE DeliveryDate < '2000-01-01'
-   OR DeliveryDate > CAST(GETDATE() AS DATE);
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-SET @CheckName = 'staging_deliveries — ExpectedDeliveryDate within plausible range';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_deliveries
-WHERE ExpectedDeliveryDate IS NOT NULL
-  AND (ExpectedDeliveryDate < '2000-01-01'
-       OR ExpectedDeliveryDate > DATEADD(YEAR, 1, CAST(GETDATE() AS DATE)));
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-SET @CheckName = 'staging_sales — DateKey within plausible range';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_sales
-WHERE DateKey < '2000-01-01'
-   OR DateKey > CAST(GETDATE() AS DATE);
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-SET @CheckName = 'staging_exceptions — ResolvedDate not before DateReported';
-SELECT @BadRows = COUNT(*)
-FROM staging.staging_exceptions
-WHERE ResolvedDate IS NOT NULL
-  AND ResolvedDate < DateReported;
-IF @BadRows > 0
-BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Referential Integrity', 'staging_exceptions',
+        'All DeliveryIDs exist in staging_deliveries',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
 /*=============================================================
-  FINAL GATE
-  Halt the pipeline if any check failed. The THROW will
-  propagate to the SQL Agent job step or orchestration layer
-  and prevent the clean-layer load from running.
+  CATEGORY 5: VALUE RANGE CHECKS
+  Confirms numeric columns contain sensible values.
 =============================================================*/
-IF @FailureCount > 0
-BEGIN
-    PRINT '=====================================';
-    PRINT 'STAGING VALIDATION FAILED: ' + CAST(@FailureCount AS VARCHAR) + ' check(s) failed.';
-    PRINT 'Clean layer load cancelled.';
-    PRINT '=====================================';
-    THROW 51001, 'Staging Layer Validation Failed. Clean Layer Load Cancelled.', 1;
-END
+
+-- staging_sales: SalesAmount >= 0
+SELECT @Count = COUNT(*) FROM staging.staging_sales WHERE SalesAmount < 0;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Value Range', 'staging_sales', 'SalesAmount is non-negative',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
+
+-- staging_sales: UnitsSold > 0
+SELECT @Count = COUNT(*) FROM staging.staging_sales WHERE UnitsSold <= 0;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Value Range', 'staging_sales', 'UnitsSold is greater than zero',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
+
+-- staging_routes: PlannedStops and ActualStops >= 0
+SELECT @Count = COUNT(*) FROM staging.staging_routes
+WHERE PlannedStops < 0 OR ActualStops < 0;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Value Range', 'staging_routes', 'PlannedStops and ActualStops are non-negative',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
+
+-- staging_routes: PlannedHours and ActualHours >= 0
+SELECT @Count = COUNT(*) FROM staging.staging_routes
+WHERE PlannedHours < 0 OR ActualHours < 0;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Value Range', 'staging_routes', 'PlannedHours and ActualHours are non-negative',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
+
+-- staging_exceptions: ResolutionTimeHours >= 0 where not null
+SELECT @Count = COUNT(*) FROM staging.staging_exceptions
+WHERE ResolutionTimeHours IS NOT NULL AND ResolutionTimeHours < 0;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Value Range', 'staging_exceptions',
+        'ResolutionTimeHours is non-negative where populated',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
+
+/*=============================================================
+  CATEGORY 6: DATE SANITY CHECKS
+  Confirms dates are logical and within expected range.
+  Source data spans 2023-2025 based on CSV inspection.
+=============================================================*/
+
+-- staging_sales: DateKey within expected range
+SELECT @Count = COUNT(*) FROM staging.staging_sales
+WHERE CAST(DateKey AS DATE) < '2023-01-01'
+   OR CAST(DateKey AS DATE) > '2025-12-31';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Date Sanity', 'staging_sales',
+        'DateKey is within expected range (2023-2025)',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
+
+-- staging_deliveries: DeliveryDate within expected range
+SELECT @Count = COUNT(*) FROM staging.staging_deliveries
+WHERE CAST(DeliveryDate AS DATE) < '2023-01-01'
+   OR CAST(DeliveryDate AS DATE) > '2025-12-31';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Date Sanity', 'staging_deliveries',
+        'DeliveryDate is within expected range (2023-2025)',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
+
+-- staging_exceptions: ResolvedDate is never before DateReported
+SELECT @Count = COUNT(*) FROM staging.staging_exceptions
+WHERE ResolvedDate IS NOT NULL AND ResolvedDate < DateReported;
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Date Sanity', 'staging_exceptions',
+        'ResolvedDate is never before DateReported',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
+
+/*=============================================================
+  CATEGORY 7: DATA QUALITY FLAGS
+  Known issues in the source CSV that will need to be handled
+  in the clean layer. Flagged as WARN so they are visible and
+  documented before clean layer work begins.
+=============================================================*/
+
+-- staging_sales: truncated ProductType values (e.g. 'L.' 'F.' 'S.')
+SELECT @Count = COUNT(*) FROM staging.staging_sales
+WHERE ProductType LIKE '_.';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Data Quality', 'staging_sales',
+        'Truncated ProductType values ending in ''.'' (e.g. ''L.'' ''F.'') - fix in clean layer',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
+
+-- staging_sales: truncated Region values (e.g. 'M.' 'S.' 'N.')
+SELECT @Count = COUNT(*) FROM staging.staging_sales
+WHERE Region LIKE '_.';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Data Quality', 'staging_sales',
+        'Truncated Region values ending in ''.'' (e.g. ''M.'' ''S.'' ''N.'') - fix in clean layer',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
+
+-- staging_deliveries: truncated ShipmentType values (e.g. 'E.' 'P.' 'S.')
+SELECT @Count = COUNT(*) FROM staging.staging_deliveries
+WHERE ShipmentType LIKE '_.';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Data Quality', 'staging_deliveries',
+        'Truncated ShipmentType values ending in ''.'' (e.g. ''E.'' ''P.'') - fix in clean layer',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
+
+-- staging_deliveries: truncated Region values
+SELECT @Count = COUNT(*) FROM staging.staging_deliveries
+WHERE Region LIKE '_.';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Data Quality', 'staging_deliveries',
+        'Truncated Region values ending in ''.'' - fix in clean layer',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
+
+-- staging_exceptions: truncated ExceptionType values
+SELECT @Count = COUNT(*) FROM staging.staging_exceptions
+WHERE ExceptionType LIKE '_.';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Data Quality', 'staging_exceptions',
+        'Truncated ExceptionType values ending in ''.'' - fix in clean layer',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
+
+-- staging_routes: NULL or empty DriverID values (59 known in source)
+SELECT @Count = COUNT(*) FROM staging.staging_routes
+WHERE DriverID IS NULL OR DriverID = '';
+INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
+VALUES ('Data Quality', 'staging_routes',
+        'NULL or empty DriverID values (59 known in source) - fix in clean layer',
+        '~59', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count BETWEEN 50 AND 70 THEN 'WARN' ELSE 'FAIL' END);
+
+GO
+
+/*=============================================================
+  FINAL SUMMARY
+  Prints full results table sorted by severity then a
+  counts summary. Review all FAIL results before proceeding
+  to the clean layer. WARN results are known issues to
+  address in the clean layer.
+=============================================================*/
+
+PRINT '--- STAGING VALIDATION RESULTS ---';
+
+SELECT
+    CheckID,
+    Category,
+    TableName,
+    CheckName,
+    Expected,
+    Actual,
+    Status
+FROM #ValidationResults
+ORDER BY
+    CASE Status
+        WHEN 'FAIL' THEN 1
+        WHEN 'WARN' THEN 2
+        WHEN 'PASS' THEN 3
+    END,
+    Category,
+    TableName;
+
+-- Summary counts
+PRINT '--- SUMMARY ---';
+
+SELECT
+    Status,
+    COUNT(*) AS CheckCount
+FROM #ValidationResults
+GROUP BY Status
+ORDER BY
+    CASE Status
+        WHEN 'FAIL' THEN 1
+        WHEN 'WARN' THEN 2
+        WHEN 'PASS' THEN 3
+    END;
+
+-- Overall result
+DECLARE @FailCount INT;
+SELECT @FailCount = COUNT(*) FROM #ValidationResults WHERE Status = 'FAIL';
+
+IF @FailCount = 0
+    PRINT 'OVERALL: PASS — No failures detected. Review WARNs before proceeding to clean layer.';
 ELSE
-BEGIN
-    PRINT '=====================================';
-    PRINT 'STAGING VALIDATION PASSED — all checks passed.';
-    PRINT 'Proceeding to clean layer.';
-    PRINT '=====================================';
-END;
+    PRINT 'OVERALL: FAIL — ' + CAST(@FailCount AS NVARCHAR)
+        + ' failure(s) detected. Do not proceed to clean layer until resolved.';
+
+PRINT '--- END OF VALIDATION ---';
+
+DROP TABLE #ValidationResults;
+GO

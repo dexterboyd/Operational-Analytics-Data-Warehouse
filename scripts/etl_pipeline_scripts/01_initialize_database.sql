@@ -26,19 +26,6 @@ WARNING: DESTRUCTIVE SCRIPT
 
     DO NOT run this script in a production environment.
 
-Change Log:
-    v2.0 - Fixed corrupted bullet characters in header comment.
-         - Added explicit collation (Latin1_General_CI_AS) to
-           CREATE DATABASE so string comparisons are consistent
-           regardless of the server's default collation.
-         - Added ALTER DATABASE ... SET COMPATIBILITY_LEVEL
-           after creation to pin optimizer behavior to SQL
-           Server 2019 (150). Adjust if targeting a different
-           version.
-         - Added ALTER DATABASE ... SET RECOVERY SIMPLE for
-           dev/test environments to prevent runaway log growth
-           during bulk loads. Remove or change to FULL in
-           production.
 =============================================================
 */
 
@@ -105,7 +92,7 @@ USE Fedex_Ops_Database;
 GO
 
 PRINT 'Fedex_Ops_Database created successfully.';
-PRINT 'Collation : Latin1_General_CI_AS';
-PRINT 'Compat    : 150 (SQL Server 2019)';
-PRINT 'Recovery  : SIMPLE (dev/test only)';
+PRINT 'Collation     : Latin1_General_CI_AS';
+PRINT 'Compatibility : 150 (SQL Server 2019)';
+PRINT 'Recovery      : SIMPLE (dev/test only)';
 GO
