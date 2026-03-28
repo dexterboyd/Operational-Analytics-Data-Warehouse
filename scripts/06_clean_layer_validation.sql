@@ -4,20 +4,19 @@
   Version:  3.0
 
   Purpose:
-      Validate cleansed datasets before loading them into the
-      Data Warehouse (dw schema). This script is informational
-      -- it surfaces issues for human review but does not halt
-      the pipeline. For an automated hard stop, use
-      07_clean_validation_gate_v3.0.sql.
+      Validate clean datasets before loading them into the
+      Data Warehouse (dw schema). This script is informational 
+	  for review but does not halt the pipeline.
+
+	  For an automated hard stop, use clean_validation_gate.sql.
 
   Run Order:
-      1. etl_staging_setup_v5.sql          -- build schemas/tables
+      1. etl_staging_setup.sql          -- build schemas/tables
       2. load_staging.py                   -- load CSV data
-      3. staging_layer_validation_v2.sql   -- validate staging
-      4. clean_layer_v1.sql                -- build clean views
-      5. 05_clean_layer_data_profiling     -- profile clean data
+      3. staging_layer_validation.sql   -- validate staging
+      4. clean_layer.sql                -- build clean views
+      5. clean_layer_data_profiling     -- profile clean data
       6. THIS SCRIPT                       -- human review
-      7. 07_clean_validation_gate_v3.0     -- pipeline gate
 
   Clean Layer Views Referenced:
       clean.clean_sales        -- standardized sales transactions
@@ -26,12 +25,11 @@
       clean.clean_exceptions   -- standardized exception records
 
   Checks Performed:
-      1. Row count comparison     (staging vs clean)
+      1. Row count comparison (staging vs clean)
       2. Required field NULL validation
       3. Business rule verification
       4. Referential integrity checks
       5. Data profiling metrics
-
 =============================================================*/
 
 USE Fedex_Ops_Database;
@@ -39,11 +37,10 @@ GO
 
 PRINT '===== CLEAN LAYER VALIDATION START =====';
 
-
 /*=============================================================
   1. ROW COUNT VALIDATION
   Purpose:
-      Ensure all records flowed from staging into the clean
+      Ensure all records flow from staging to the clean
       views. The clean layer applies transformations only --
       it does not filter rows -- so CleanRows should always
       equal StagingRows. A non-zero DroppedRows count
@@ -81,20 +78,18 @@ SELECT
     (SELECT COUNT(*) FROM staging.staging_routes)
         - (SELECT COUNT(*) FROM clean.clean_routes)     AS DroppedRows;
 
-
 /*=============================================================
   2. REQUIRED FIELD NULL CHECKS
   Purpose:
       Return rows missing critical identifiers that would
       break fact table loading or dimension joins. Only key
-      columns are returned to keep output actionable.
+      columns are returned.
 
       NOTE: clean_exceptions.ResolvedDate is excluded --
       NULL means the exception is still open, which is valid.
 
       NOTE: clean_deliveries.DriverID is excluded -- the view
-      replaces all NULLs with 'Unknown' so it can never be
-      NULL after transformation.
+      replaces all NULLs with 'Unknown'.
 =============================================================*/
 
 PRINT '===== 2. NULL VALIDATION =====';
@@ -153,7 +148,6 @@ WHERE RouteID      IS NULL
    OR ActualStops  IS NULL
    OR PlannedHours IS NULL
    OR ActualHours  IS NULL;
-
 
 /*=============================================================
   3. BUSINESS RULE VALIDATION
@@ -216,27 +210,38 @@ WHERE ResolvedDate IS NOT NULL
 
 -- Truncation check: no abbreviated values should remain
 -- after clean layer transformation. All counts should be 0.
-SELECT 'clean_sales       ProductType'   AS Check_, COUNT(*) AS Remaining
-FROM   clean.clean_sales      WHERE ProductType   LIKE '_.'
+SELECT 'clean_sales ProductType' AS Check_, COUNT(*) AS Remaining
+FROM clean.clean_sales
+WHERE ProductType LIKE '_.'
 UNION ALL
-SELECT 'clean_sales       Region'        AS Check_, COUNT(*) AS Remaining
-FROM   clean.clean_sales      WHERE Region        LIKE '_.'
-UNION ALL
-SELECT 'clean_deliveries  ShipmentType'  AS Check_, COUNT(*) AS Remaining
-FROM   clean.clean_deliveries WHERE ShipmentType  LIKE '_.'
-UNION ALL
-SELECT 'clean_deliveries  Region'        AS Check_, COUNT(*) AS Remaining
-FROM   clean.clean_deliveries WHERE Region        LIKE '_.'
-UNION ALL
-SELECT 'clean_exceptions  ExceptionType' AS Check_, COUNT(*) AS Remaining
-FROM   clean.clean_exceptions WHERE ExceptionType LIKE '_.'
-UNION ALL
-SELECT 'clean_routes      Region'        AS Check_, COUNT(*) AS Remaining
-FROM   clean.clean_routes     WHERE Region        LIKE '_.'
-UNION ALL
-SELECT 'clean_routes      Unknown DriverID' AS Check_, COUNT(*) AS Remaining
-FROM   clean.clean_routes     WHERE DriverID = 'Unknown';
 
+SELECT 'clean_sales Region' AS Check_, COUNT(*) AS Remaining
+FROM clean.clean_sales
+WHERE Region LIKE '_.'
+UNION ALL
+
+SELECT 'clean_deliveries  ShipmentType' AS Check_, COUNT(*) AS Remaining
+FROM clean.clean_deliveries
+WHERE ShipmentType  LIKE '_.'
+UNION ALL
+
+SELECT 'clean_deliveries  Region' AS Check_, COUNT(*) AS Remaining
+FROM clean.clean_deliveries
+WHERE Region LIKE '_.'
+UNION ALL
+
+SELECT 'clean_exceptions  ExceptionType' AS Check_, COUNT(*) AS Remaining
+FROM   clean.clean_exceptions
+WHERE ExceptionType LIKE '_.'
+UNION ALL
+
+SELECT 'clean_routes Region' AS Check_, COUNT(*) AS Remaining
+FROM clean.clean_routes WHERE Region LIKE '_.'
+UNION ALL
+
+SELECT 'clean_routes Unknown DriverID' AS Check_, COUNT(*) AS Remaining
+FROM clean.clean_routes
+WHERE DriverID = 'Unknown';
 
 /*=============================================================
   4. REFERENTIAL INTEGRITY CHECKS
@@ -273,7 +278,6 @@ WHERE NOT EXISTS (
     WHERE d.DeliveryID = e.DeliveryID
 );
 
-
 /*=============================================================
   5. DATA PROFILING METRICS
   Purpose:
@@ -296,9 +300,7 @@ FROM clean.clean_sales;
 SELECT
     Region,
     COUNT(*)                                            AS RecordCount,
-    ROUND(
-        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
-    2)                                                  AS PctOfTotal
+    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 2)   AS PctOfTotal
 FROM clean.clean_sales
 GROUP BY Region
 ORDER BY RecordCount DESC;
@@ -307,9 +309,7 @@ ORDER BY RecordCount DESC;
 SELECT
     DeliveryStatus,
     COUNT(*)                                            AS RecordCount,
-    ROUND(
-        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
-    2)                                                  AS PctOfTotal
+    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 2)   AS PctOfTotal
 FROM clean.clean_deliveries
 GROUP BY DeliveryStatus
 ORDER BY RecordCount DESC;
@@ -330,13 +330,10 @@ FROM clean.clean_routes;
 SELECT
     ExceptionType,
     COUNT(*)                                            AS RecordCount,
-    ROUND(
-        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(),
-    2)                                                  AS PctOfTotal
+    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 2)   AS PctOfTotal
 FROM clean.clean_exceptions
 GROUP BY ExceptionType
 ORDER BY RecordCount DESC;
-
 
 /*=============================================================
   VALIDATION COMPLETE

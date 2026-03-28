@@ -6,8 +6,7 @@
   Purpose:
       Production data quality gate before DW load. Executes a
       series of checks and calls THROW to abort the pipeline
-      if any check fails. Designed to be called from a SQL
-      Agent job step or pipeline orchestrator.
+      if any check fails.
 
   Behavior:
       - Each check sets @BadRows and logs PASS or FAIL
@@ -22,8 +21,8 @@
       2. load_staging.py                   -- load CSV data
       3. staging_layer_validation_v2.sql   -- validate staging
       4. clean_layer_v1.sql                -- build clean views
-      5. 05_clean_layer_data_profiling     -- profile clean data
-      6. 06_clean_layer_validation         -- human review
+      5. clean_layer_data_profiling        -- profile clean data
+      6. clean_layer_validation            -- human review
       7. THIS SCRIPT                       -- pipeline gate
 
   Clean Layer Views Referenced:
@@ -31,20 +30,6 @@
       clean.clean_deliveries   -- standardized delivery records
       clean.clean_routes       -- route performance with surrogate key
       clean.clean_exceptions   -- standardized exception records
-
-  Checks Performed:
-      1.  Empty table guard      -- all four clean views must have rows
-      2.  Sales required fields  -- DateKey, SalesAmount, UnitsSold not NULL
-      3.  Delivery required fields -- DeliveryID, RouteID, DeliveryDate not NULL
-      4.  IsLate flag accuracy   -- Late/Exception rows must have IsLate = 1
-      5.  IsLate false positive  -- On-Time rows must have IsLate = 0
-      6.  PriorityFlag values    -- must be 0 or 1 only
-      7.  IsResolved accuracy    -- rows with ResolvedDate must have IsResolved = 1
-      8.  Truncation check       -- no abbreviated values remain in clean layer
-      9.  Route source validity  -- no invalid stops/hours in staging source data
-      10. Referential integrity  -- clean_sales.DeliveryID exists in clean_deliveries
-      11. Referential integrity  -- clean_exceptions.DeliveryID exists in clean_deliveries
-
 =============================================================*/
 
 SET XACT_ABORT ON;
@@ -66,7 +51,6 @@ PRINT '===== CLEAN VALIDATION GATE START =====';
 DECLARE @FailureCount INT        = 0;
 DECLARE @CheckName    NVARCHAR(200);
 DECLARE @BadRows      INT;
-
 
 /*=============================================================
   CHECK 1: EMPTY TABLE GUARD
@@ -121,7 +105,6 @@ END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-
 /*=============================================================
   CHECK 2: SALES REQUIRED FIELDS
   Purpose:
@@ -145,7 +128,6 @@ BEGIN
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
-
 
 /*=============================================================
   CHECK 3: DELIVERY REQUIRED FIELDS
@@ -171,7 +153,6 @@ BEGIN
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
-
 
 /*=============================================================
   CHECK 4: ISLATE FLAG — LATE AND EXCEPTION DELIVERIES
@@ -199,7 +180,6 @@ END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-
 /*=============================================================
   CHECK 5: ISLATE FLAG — ON-TIME DELIVERIES
   Purpose:
@@ -224,7 +204,6 @@ END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-
 /*=============================================================
   CHECK 6: PRIORITYFLAG NORMALIZATION
   Purpose:
@@ -246,7 +225,6 @@ BEGIN
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
-
 
 /*=============================================================
   CHECK 7: ISRESOLVED FLAG ACCURACY
@@ -270,7 +248,6 @@ BEGIN
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
-
 
 /*=============================================================
   CHECK 8: TRUNCATION CHECK
@@ -298,7 +275,6 @@ BEGIN
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
-
 
 /*=============================================================
   CHECK 9: ROUTE SOURCE DATA VALIDITY
@@ -331,7 +307,6 @@ END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-
 /*=============================================================
   CHECK 10: REFERENTIAL INTEGRITY — clean_sales.DeliveryID
   Purpose:
@@ -358,7 +333,6 @@ END
 ELSE
     PRINT 'PASS: ' + @CheckName;
 
-
 /*=============================================================
   CHECK 11: REFERENTIAL INTEGRITY — clean_exceptions.DeliveryID
   Purpose:
@@ -383,7 +357,6 @@ BEGIN
 END
 ELSE
     PRINT 'PASS: ' + @CheckName;
-
 
 /*=============================================================
   FINAL PIPELINE DECISION

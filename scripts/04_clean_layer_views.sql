@@ -5,41 +5,26 @@
 
   Purpose:
       Create views in the clean schema that standardize and
-      transform raw staging data. No data is moved or copied --
-      the clean layer is entirely view-based so it always
+      transform raw staging data. No data is moved or copied.
+      The clean layer is entirely view-based so it always
       reflects the latest staging data automatically.
 
   Run Order:
-      1. etl_staging_setup_v5.sql          -- build schemas/tables
-      2. load_staging.py                   -- load CSV data
-      3. staging_layer_validation_v2.sql   -- validate staging
-      4. THIS SCRIPT                       -- build clean layer
+      1. etl_staging_setup.sql          -- build schemas/tables
+      2. load_staging.py                -- load CSV data
+      3. staging_layer_validation.sql   -- validate staging
+      4. THIS SCRIPT                    -- build clean layer
 
   Transformations Applied:
       All four views fix the truncated categorical values found
       during staging validation, standardize NULLs, and add
       derived columns useful for downstream DW and reporting.
 
-  Truncation Mappings (applied in all relevant views):
-      Region:        M.  ->  MW   |  N.  ->  N   |  S.  ->  S
-      ProductType:   F.  ->  Freight
-                     L.  ->  Large Package
-                     M.  ->  Medium Package
-                     S.  ->  Small Package
-      ShipmentType:  E.  ->  Express
-                     P.  ->  Priority
-                     S.  ->  Standard
-      ExceptionType: A.  ->  Address Issue
-                     C.  ->  Customer Not Available
-                     M.  ->  Mechanical
-                     W.  ->  Weather
-
   Clean Layer Views:
       clean.clean_sales        -- standardized sales transactions
       clean.clean_deliveries   -- standardized delivery records
-      clean.clean_routes       -- deduplicated route performance
+      clean.clean_routes       -- standardized route performance
       clean.clean_exceptions   -- standardized exception records
-
 =============================================================*/
 
 USE Fedex_Ops_Database;
@@ -59,11 +44,6 @@ GO
 /*=============================================================
   VIEW: clean.clean_sales
 
-  Fixes:
-      - Truncated ProductType values  (F. L. M. S.)
-      - Truncated Region values       (M. N. S.)
- 
-  Adds:
       - SaleDate        DATE only, time stripped from DateKey
       - SaleYear        Year of sale
       - SaleMonth       Month of sale
@@ -117,12 +97,6 @@ GO
 /*=============================================================
   VIEW: clean.clean_deliveries
 
-  Fixes:
-      - Truncated ShipmentType values  (E. P. S.)
-      - Truncated Region values        (M. N. S.)
-      - NULL DriverID replaced with    'Unknown'
- 
-  Adds:
       - DeliveryDateOnly    DATE only, time stripped
       - ExpectedDateOnly    DATE only, time stripped
       - DeliveryYear        Year of delivery
@@ -196,15 +170,6 @@ GO
 /*=============================================================
   VIEW: clean.clean_routes
 
-  Fixes:
-      - Truncated Region values    (M. N. S.)
-      - NULL DriverID replaced with 'Unknown'
-      - Duplicate RouteID+DriverID rows are genuine separate
-        route runs (different stops, hours, and regions).
-        A surrogate key RouteRunID is added via ROW_NUMBER
-        to make each run uniquely identifiable downstream.
- 
-  Adds:
       - RouteRunID        Surrogate key per unique route run
       - StopVariance      ActualStops  - PlannedStops
       - HourVariance      ActualHours  - PlannedHours
@@ -264,11 +229,6 @@ GO
 /*=============================================================
   VIEW: clean.clean_exceptions
 
-  Fixes:
-      - Truncated ExceptionType values  (A. C. M. W.)
-      - Truncated Region values         (M. N. S.)
- 
-  Adds:
       - DateReportedOnly   DATE only, time stripped
       - ResolvedDateOnly   DATE only, time stripped
       - ExceptionYear      Year exception was reported
@@ -341,8 +301,7 @@ GO
 
   Quick row count and truncation check to confirm all four
   views are working and truncated values have been resolved.
-  All Remaining counts should be 0 except clean_routes
-  Unknown DriverID which reflects expected replacements.
+  All Remaining counts should be 0 except clean_routes.
 =============================================================*/
 
 PRINT '--- CLEAN LAYER SMOKE TEST ---';

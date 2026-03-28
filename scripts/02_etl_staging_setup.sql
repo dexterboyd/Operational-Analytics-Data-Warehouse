@@ -18,13 +18,11 @@
   Data Loading:
       CSV data is loaded into staging tables via load_staging.py.
       Run that script after this one to populate the tables.
-      load_staging.py location: C:\ETL_DATA\load_staging.py
 
   Validation:
-      Run staging_layer_validation_v2.sql after each load to
+      Run staging_layer_validation.sql after each load to
       confirm data landed correctly before proceeding to the
       clean layer.
-
 =============================================================*/
 
 USE Fedex_Ops_Database;

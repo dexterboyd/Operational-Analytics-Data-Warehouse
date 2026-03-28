@@ -9,15 +9,9 @@
       FAIL and WARN results before proceeding to the clean layer.
 
   Run Order:
-      1. etl_staging_setup_v5.sql        -- build schemas and tables
+      1. etl_staging_setup.sql           -- build schemas and tables
       2. load_staging.py                 -- load CSV data
       3. THIS SCRIPT                     -- validate staging data
-
-  Changes from v1.0:
-      - Row count checks are now dynamic. Expected values are
-        pulled from staging.load_log (written by load_staging.py)
-        instead of being hardcoded. Validation automatically
-        adapts when source file sizes change.
 
   Validation Categories:
       1. Row Counts        -- current counts match last load

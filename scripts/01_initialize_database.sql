@@ -23,9 +23,6 @@ WARNING: DESTRUCTIVE SCRIPT
         - Development environments
         - Local testing environments
         - Initial project setup
-
-    DO NOT run this script in a production environment.
-
 =============================================================
 */
 

@@ -1,383 +1,569 @@
-/*==============================================================
-  DW VALIDATION SCRIPT
+/*=============================================================
+  DW VALIDATION GATE
   Database: Fedex_Ops_Database
-  Version:  2.0
+  Version:  3.0
 
   Purpose:
-      Validate all Data Warehouse tables after the DW load.
-      Acts as a hard pipeline gate: calls THROW to halt any
-      downstream reporting layer load if critical checks fail.
+      Hard pipeline gate after the DW load. Executes checks
+      and calls THROW to halt any downstream reporting layer
+      load if critical checks fail. Designed to be called
+      from a SQL Agent job step or pipeline orchestrator.
+
+  Behavior:
+      - Each check sets @BadRows and logs PASS or FAIL
+      - @FailureCount accumulates across all checks
+      - If @FailureCount > 0 at the end, THROW halts execution
+        and the reporting layer load should not proceed
+      - SET XACT_ABORT ON ensures any open transaction is
+        rolled back if THROW fires inside a transaction context
+
+  Run Order:
+      1. etl_staging_setup.sql          -- build schemas/tables
+      2. load_staging.py                   -- load CSV data
+      3. staging_layer_validation.sql   -- validate staging
+      4. clean_layer.sql                -- build clean views
+      5. 07_clean_validation_gate.0     -- clean layer gate
+      6. dw_layer.sql                   -- build DW tables
+      7. THIS SCRIPT                       -- DW gate
+
+  DW Schema Referenced:
+      Dimensions:
+          dw.dim_date            dw.dim_driver
+          dw.dim_region          dw.dim_product
+          dw.dim_shipment_type   dw.dim_exception_type
+          dw.dim_route
+      Facts:
+          dw.fact_deliveries     dw.fact_sales
+          dw.fact_exceptions
 
   Checks Performed:
-      1.  Empty table guard      — all DW tables must have rows
-      2.  Row count comparison   — DW facts vs clean views
-      3.  NULL surrogate keys    — all FK columns in fact tables
-      4.  Duplicate primary keys — all fact and dimension tables
-      5.  FK integrity           — fact rows missing dimension matches
-      6.  Business metric sanity — SalesAmount, UnitsSold > 0
-      7.  Delivery date logic    — DeliveryDateKey <= ExpectedDateKey
-          where status is not LATE
-      8.  Distribution summary   — informational row counts per table
+      1.  Empty table guard      -- all 10 DW tables must have rows
+      2.  Row count comparison   -- DW facts vs clean views
+      3.  NULL surrogate keys    -- FK columns in all fact tables
+      4.  Duplicate primary keys -- all fact and dimension tables
+      5.  FK integrity           -- fact rows missing dim matches
+      6.  Business metric sanity -- SalesAmount, UnitsSold > 0
+      7.  Delivery status logic  -- IsLate flag vs DeliveryStatus
+      8.  Exception flag logic   -- IsResolved vs ResolvedDateKey
 
-  Pipeline Position:
-      staging -> clean -> dw load -> [THIS SCRIPT] -> reporting -> BI
-
-  Consolidated from:
-      08_dw_validation.sql (v1) and 08_dw_validation_v2.sql
-      Both files performed the same checks with minor
-      differences. This file is the single authoritative
-      version.
-
-  Change Log:
-      v2.0 - Merged v1 and v2 into one file; removed duplicate.
-           - Added SET XACT_ABORT ON + SET LOCK_TIMEOUT.
-           - Added Check 1: empty table guard. Vacuous pass
-             prevention — null/FK checks always pass on empty
-             tables.
-           - Added Check 2: row count comparison between DW
-             fact tables and their source clean views to surface
-             any rows lost during surrogate key joins.
-           - Fixed NULL surrogate key check: now explicitly lists
-             only true FK columns per fact table instead of using
-             a dynamic LIKE '%ID' pattern that generated invalid
-             table names (e.g. dw.dim_Sales) for non-FK columns.
-           - Added Check 4: explicit duplicate PK check per table
-             rather than relying on the FK constraint system to
-             catch them.
-           - Added Check 5: explicit fact-to-dimension integrity
-             checks for each FK relationship.
-           - Added Check 6: business metric sanity (no zero or
-             negative amounts in fact_sales).
-           - Added Check 7: delivery date logic validation.
-           - Added failure gate using THROW consistent with the
-             clean layer gate pattern.
-           - Renamed file prefix from 08_ to 09_ to avoid
-             filename-ordering collision with the load script.
-==============================================================*/
+=============================================================*/
 
 SET XACT_ABORT ON;
+
+-- Abort if any single scan blocks for more than 30 seconds.
+-- Adjust or remove if long-running queries are expected.
 SET LOCK_TIMEOUT 30000;
 
-PRINT '===== DW VALIDATION START =====';
+USE Fedex_Ops_Database;
+GO
 
-DECLARE @FailureCount INT      = 0;
+PRINT '===== DW VALIDATION GATE START =====';
+
+DECLARE @FailureCount INT        = 0;
 DECLARE @CheckName    NVARCHAR(200);
 DECLARE @BadRows      INT;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 1: EMPTY TABLE GUARD
-  All DW tables must contain rows. An empty table means the
-  load failed or rolled back; all downstream checks would
-  pass vacuously on empty tables, giving a false all-clear.
-==============================================================*/
+  All 10 DW tables (7 dimensions + 3 facts) must contain rows.
+  An empty table means the load failed or rolled back silently.
+  All downstream null and FK checks pass vacuously on empty
+  tables, producing a false all-clear. Fail immediately if
+  any table is empty.
+=============================================================*/
+
 PRINT '--- CHECK 1: EMPTY TABLE GUARD ---';
 
+-- Dimension tables
 SET @CheckName = 'dw.dim_date — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.dim_date;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 1096 rows (2023-2025 date spine)'; SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dw.dim_driver — not empty';
+SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.dim_driver;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 21 rows (20 named + Unknown)'; SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 SET @CheckName = 'dw.dim_region — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.dim_region;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 7 rows'; SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dw.dim_product — not empty';
+SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.dim_product;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 4 rows'; SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dw.dim_shipment_type — not empty';
+SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.dim_shipment_type;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 3 rows'; SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dw.dim_exception_type — not empty';
+SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.dim_exception_type;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 4 rows'; SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dw.dim_route — not empty';
+SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.dim_route;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 5 rows (R001-R005)'; SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- Fact tables
+SET @CheckName = 'dw.fact_deliveries — not empty';
+SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.fact_deliveries;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 5000 rows'; SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 SET @CheckName = 'dw.fact_sales — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.fact_sales;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-SET @CheckName = 'dw.fact_deliveries — not empty';
-SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.fact_deliveries;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
-SET @CheckName = 'dw.fact_routes — not empty';
-SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.fact_routes;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 4000 rows'; SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 SET @CheckName = 'dw.fact_exceptions — not empty';
 SELECT @BadRows = CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM dw.fact_exceptions;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName; SET @FailureCount += 1; END
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Expected 1000 rows'; SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 2: ROW COUNT COMPARISON (FACT vs CLEAN VIEW)
-  Rows dropped during the DW load mean surrogate key lookups
-  failed. The DW fact count should equal the clean view count.
-  Informational only — logged but does not increment
-  @FailureCount since some drop may be expected during
-  initial pipeline runs. Investigate any non-zero difference.
-==============================================================*/
-PRINT '--- CHECK 2: FACT vs CLEAN ROW COUNTS ---';
+  DW fact row counts must match their source clean view counts.
+  Any discrepancy means rows were dropped during surrogate key
+  joins in the DW load -- typically caused by a dimension
+  member missing from a dim table.
+  Informational only -- logged but does not increment
+  @FailureCount since the empty table guard in Check 1 already
+  catches the worst case. Investigate any non-zero DroppedRows.
+
+  NOTE: View names use clean.clean_* naming convention from
+  clean_layer_v1.sql, not the vw_* naming in earlier versions.
+=============================================================*/
+
+PRINT '--- CHECK 2: FACT vs CLEAN ROW COUNTS (INFORMATIONAL) ---';
 
 SELECT
-    'fact_sales'                                    AS FactTable,
-    (SELECT COUNT(*) FROM clean.vw_sales)           AS CleanRows,
-    (SELECT COUNT(*) FROM dw.fact_sales)            AS DWRows,
-    (SELECT COUNT(*) FROM clean.vw_sales)
-        - (SELECT COUNT(*) FROM dw.fact_sales)      AS DroppedRows;
+    'fact_deliveries'                                       AS FactTable,
+    (SELECT COUNT(*) FROM clean.clean_deliveries)           AS CleanRows,
+    (SELECT COUNT(*) FROM dw.fact_deliveries)               AS DWRows,
+    (SELECT COUNT(*) FROM clean.clean_deliveries)
+        - (SELECT COUNT(*) FROM dw.fact_deliveries)         AS DroppedRows;
 
 SELECT
-    'fact_deliveries'                               AS FactTable,
-    (SELECT COUNT(*) FROM clean.vw_deliveries)      AS CleanRows,
-    (SELECT COUNT(*) FROM dw.fact_deliveries)       AS DWRows,
-    (SELECT COUNT(*) FROM clean.vw_deliveries)
-        - (SELECT COUNT(*) FROM dw.fact_deliveries) AS DroppedRows;
+    'fact_sales'                                            AS FactTable,
+    (SELECT COUNT(*) FROM clean.clean_sales)                AS CleanRows,
+    (SELECT COUNT(*) FROM dw.fact_sales)                    AS DWRows,
+    (SELECT COUNT(*) FROM clean.clean_sales)
+        - (SELECT COUNT(*) FROM dw.fact_sales)              AS DroppedRows;
 
 SELECT
-    'fact_routes'                                   AS FactTable,
-    (SELECT COUNT(*) FROM clean.vw_routes)          AS CleanRows,
-    (SELECT COUNT(*) FROM dw.fact_routes)           AS DWRows,
-    (SELECT COUNT(*) FROM clean.vw_routes)
-        - (SELECT COUNT(*) FROM dw.fact_routes)     AS DroppedRows;
-
-SELECT
-    'fact_exceptions'                               AS FactTable,
-    (SELECT COUNT(*) FROM clean.vw_exceptions)      AS CleanRows,
-    (SELECT COUNT(*) FROM dw.fact_exceptions)       AS DWRows,
-    (SELECT COUNT(*) FROM clean.vw_exceptions)
-        - (SELECT COUNT(*) FROM dw.fact_exceptions) AS DroppedRows;
+    'fact_exceptions'                                       AS FactTable,
+    (SELECT COUNT(*) FROM clean.clean_exceptions)           AS CleanRows,
+    (SELECT COUNT(*) FROM dw.fact_exceptions)               AS DWRows,
+    (SELECT COUNT(*) FROM clean.clean_exceptions)
+        - (SELECT COUNT(*) FROM dw.fact_exceptions)         AS DroppedRows;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 3: NULL SURROGATE KEY CHECKS
-  Only genuine FK columns are listed per fact table.
-  Using a LIKE '%ID' pattern is avoided because it matches
-  non-FK columns (e.g. SalesID, ExceptionID) and would
-  attempt to join to non-existent dimension tables.
-==============================================================*/
+  Every FK surrogate key column in every fact table must be
+  populated. A NULL surrogate key means the dim lookup JOIN
+  failed during the DW load -- the row loaded but without a
+  valid dimension reference.
+
+  Only true FK columns are listed per fact table. Natural key
+  columns (SalesID, DeliveryID, ExceptionID) and non-FK
+  measures (UnitsSold, SalesAmount etc.) are excluded.
+
+  NOTE: DeliveryStatus and PriorityFlag on fact_deliveries are
+  NOT surrogate keys -- they are denormalised NVARCHAR and BIT
+  columns copied directly from the clean layer. They are
+  checked in Check 6 and 7 instead.
+=============================================================*/
+
 PRINT '--- CHECK 3: NULL SURROGATE KEY CHECKS ---';
 
--- fact_sales
+-- fact_sales FK columns: DateKey, ProductSK, RegionSK
 SET @CheckName = 'fact_sales — no NULL surrogate keys';
 SELECT @BadRows = COUNT(*) FROM dw.fact_sales
-WHERE DateKey       IS NULL
-   OR ProductTypeID IS NULL
-   OR RegionID      IS NULL;
+WHERE DateKey    IS NULL
+   OR ProductSK  IS NULL
+   OR RegionSK   IS NULL;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
--- fact_deliveries
+-- fact_deliveries FK columns: DateKey, DriverSK, RegionSK, ShipmentTypeSK, RouteSK
 SET @CheckName = 'fact_deliveries — no NULL surrogate keys';
 SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries
-WHERE RouteID                 IS NULL
-   OR DriverID                IS NULL
-   OR ShipmentTypeID          IS NULL
-   OR DeliveryDateKey         IS NULL
-   OR ExpectedDeliveryDateKey IS NULL
-   OR DeliveryStatusID        IS NULL
-   OR PriorityFlagID          IS NULL;
+WHERE DateKey        IS NULL
+   OR DriverSK       IS NULL
+   OR RegionSK       IS NULL
+   OR ShipmentTypeSK IS NULL
+   OR RouteSK        IS NULL;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
--- fact_routes
-SET @CheckName = 'fact_routes — no NULL surrogate keys';
-SELECT @BadRows = COUNT(*) FROM dw.fact_routes
-WHERE RouteID  IS NULL
-   OR DriverID IS NULL
-   OR RegionID IS NULL;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
-
--- fact_exceptions
-SET @CheckName = 'fact_exceptions — no NULL surrogate keys';
+-- fact_exceptions FK columns: DateReportedKey, ExceptionTypeSK, RegionSK
+-- ResolvedDateKey is intentionally excluded: NULL means open exception
+SET @CheckName = 'fact_exceptions — no NULL surrogate keys on required FK columns';
 SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions
-WHERE ExceptionTypeID IS NULL
-   OR DateKey         IS NULL
-   OR PriorityFlagID  IS NULL
-   OR RegionID        IS NULL;
+WHERE DateReportedKey  IS NULL
+   OR ExceptionTypeSK  IS NULL
+   OR RegionSK         IS NULL;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 4: DUPLICATE PRIMARY KEY CHECKS
-  The PKs are enforced by constraints, but a belt-and-
-  suspenders count confirms no duplicates slipped in and
-  that the PK constraints are actually in place.
-==============================================================*/
+  Every fact and dimension table must have unique primary keys.
+  Duplicates would cause double-counting in all aggregations.
+=============================================================*/
+
 PRINT '--- CHECK 4: DUPLICATE PRIMARY KEY CHECKS ---';
 
-SET @CheckName = 'fact_sales — no duplicate SalesID';
+-- Dimension tables
+SET @CheckName = 'dim_date — DateKey is unique';
 SELECT @BadRows = COUNT(*) FROM (
-    SELECT SalesID FROM dw.fact_sales GROUP BY SalesID HAVING COUNT(*) > 1
+    SELECT DateKey FROM dw.dim_date GROUP BY DateKey HAVING COUNT(*) > 1
 ) x;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_deliveries — no duplicate DeliveryID';
+SET @CheckName = 'dim_driver — DriverSK is unique';
+SELECT @BadRows = COUNT(*) FROM (
+    SELECT DriverSK FROM dw.dim_driver GROUP BY DriverSK HAVING COUNT(*) > 1
+) x;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dim_region — RegionSK is unique';
+SELECT @BadRows = COUNT(*) FROM (
+    SELECT RegionSK FROM dw.dim_region GROUP BY RegionSK HAVING COUNT(*) > 1
+) x;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dim_product — ProductSK is unique';
+SELECT @BadRows = COUNT(*) FROM (
+    SELECT ProductSK FROM dw.dim_product GROUP BY ProductSK HAVING COUNT(*) > 1
+) x;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dim_shipment_type — ShipmentTypeSK is unique';
+SELECT @BadRows = COUNT(*) FROM (
+    SELECT ShipmentTypeSK FROM dw.dim_shipment_type GROUP BY ShipmentTypeSK HAVING COUNT(*) > 1
+) x;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dim_exception_type — ExceptionTypeSK is unique';
+SELECT @BadRows = COUNT(*) FROM (
+    SELECT ExceptionTypeSK FROM dw.dim_exception_type GROUP BY ExceptionTypeSK HAVING COUNT(*) > 1
+) x;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'dim_route — RouteSK is unique';
+SELECT @BadRows = COUNT(*) FROM (
+    SELECT RouteSK FROM dw.dim_route GROUP BY RouteSK HAVING COUNT(*) > 1
+) x;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- Fact tables
+SET @CheckName = 'fact_deliveries — DeliveryID is unique';
 SELECT @BadRows = COUNT(*) FROM (
     SELECT DeliveryID FROM dw.fact_deliveries GROUP BY DeliveryID HAVING COUNT(*) > 1
 ) x;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_exceptions — no duplicate ExceptionID';
+SET @CheckName = 'fact_sales — SalesID is unique';
+SELECT @BadRows = COUNT(*) FROM (
+    SELECT SalesID FROM dw.fact_sales GROUP BY SalesID HAVING COUNT(*) > 1
+) x;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+SET @CheckName = 'fact_exceptions — ExceptionID is unique';
 SELECT @BadRows = COUNT(*) FROM (
     SELECT ExceptionID FROM dw.fact_exceptions GROUP BY ExceptionID HAVING COUNT(*) > 1
 ) x;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_routes — no duplicate RouteID + DriverID';
-SELECT @BadRows = COUNT(*) FROM (
-    SELECT RouteID, DriverID FROM dw.fact_routes GROUP BY RouteID, DriverID HAVING COUNT(*) > 1
-) x;
-IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Duplicate PKs = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
-ELSE PRINT 'PASS: ' + @CheckName;
 
+/*=============================================================
+  CHECK 5: FACT-TO-DIMENSION FK INTEGRITY
+  Verifies that every FK surrogate key value in a fact table
+  resolves to a row in its referenced dimension table.
+  Orphaned FK values cause silent row loss during reporting
+  joins even when the FK constraint exists with NOCHECK.
 
-/*==============================================================
-  CHECK 5: FACT-TO-DIMENSION REFERENTIAL INTEGRITY
-  Verifies that every FK value in a fact table resolves to a
-  row in its referenced dimension. Joins two fact tables on
-  a shared business key is intentionally avoided here —
-  these are strictly fact-to-dimension checks.
-==============================================================*/
+  NOTE: fact_sales also references fact_deliveries via
+  DeliveryID. That fact-to-fact check is included here
+  because a sales row with no matching delivery would lose
+  all delivery context in reporting joins.
+=============================================================*/
+
 PRINT '--- CHECK 5: FK INTEGRITY CHECKS ---';
 
+-- fact_sales -> dim_date
 SET @CheckName = 'fact_sales -> dim_date';
 SELECT @BadRows = COUNT(*) FROM dw.fact_sales f
 WHERE NOT EXISTS (SELECT 1 FROM dw.dim_date d WHERE d.DateKey = f.DateKey);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_sales -> dim_product_type';
+-- fact_sales -> dim_product
+SET @CheckName = 'fact_sales -> dim_product';
 SELECT @BadRows = COUNT(*) FROM dw.fact_sales f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_product_type d WHERE d.ProductTypeID = f.ProductTypeID);
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_product d WHERE d.ProductSK = f.ProductSK);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
+-- fact_sales -> dim_region
 SET @CheckName = 'fact_sales -> dim_region';
 SELECT @BadRows = COUNT(*) FROM dw.fact_sales f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_region d WHERE d.RegionID = f.RegionID);
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_region d WHERE d.RegionSK = f.RegionSK);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_deliveries -> dim_route';
+-- fact_sales -> fact_deliveries (fact-to-fact: all sales must have a delivery)
+SET @CheckName = 'fact_sales -> fact_deliveries (DeliveryID)';
+SELECT @BadRows = COUNT(*) FROM dw.fact_sales f
+WHERE NOT EXISTS (SELECT 1 FROM dw.fact_deliveries d WHERE d.DeliveryID = f.DeliveryID);
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- fact_deliveries -> dim_date
+SET @CheckName = 'fact_deliveries -> dim_date';
 SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_route d WHERE d.RouteID = f.RouteID);
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_date d WHERE d.DateKey = f.DateKey);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
+-- fact_deliveries -> dim_driver
 SET @CheckName = 'fact_deliveries -> dim_driver';
 SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_driver d WHERE d.DriverID = f.DriverID);
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_driver d WHERE d.DriverSK = f.DriverSK);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_deliveries -> dim_delivery_status';
+-- fact_deliveries -> dim_region
+SET @CheckName = 'fact_deliveries -> dim_region';
 SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_delivery_status d WHERE d.DeliveryStatusID = f.DeliveryStatusID);
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_region d WHERE d.RegionSK = f.RegionSK);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
+-- fact_deliveries -> dim_shipment_type
+SET @CheckName = 'fact_deliveries -> dim_shipment_type';
+SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries f
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_shipment_type d WHERE d.ShipmentTypeSK = f.ShipmentTypeSK);
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- fact_deliveries -> dim_route
+SET @CheckName = 'fact_deliveries -> dim_route';
+SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries f
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_route d WHERE d.RouteSK = f.RouteSK);
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- fact_exceptions -> dim_date (DateReportedKey)
+SET @CheckName = 'fact_exceptions -> dim_date (DateReportedKey)';
+SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions f
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_date d WHERE d.DateKey = f.DateReportedKey);
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- fact_exceptions -> dim_date (ResolvedDateKey) -- NULL allowed for open exceptions
+SET @CheckName = 'fact_exceptions -> dim_date (ResolvedDateKey where not NULL)';
+SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions f
+WHERE ResolvedDateKey IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM dw.dim_date d WHERE d.DateKey = f.ResolvedDateKey);
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- fact_exceptions -> dim_exception_type
 SET @CheckName = 'fact_exceptions -> dim_exception_type';
 SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_exception_type d WHERE d.ExceptionTypeID = f.ExceptionTypeID);
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_exception_type d WHERE d.ExceptionTypeSK = f.ExceptionTypeSK);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_routes -> dim_route';
-SELECT @BadRows = COUNT(*) FROM dw.fact_routes f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_route d WHERE d.RouteID = f.RouteID);
+-- fact_exceptions -> dim_region
+SET @CheckName = 'fact_exceptions -> dim_region';
+SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions f
+WHERE NOT EXISTS (SELECT 1 FROM dw.dim_region d WHERE d.RegionSK = f.RegionSK);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_routes -> dim_driver';
-SELECT @BadRows = COUNT(*) FROM dw.fact_routes f
-WHERE NOT EXISTS (SELECT 1 FROM dw.dim_driver d WHERE d.DriverID = f.DriverID);
+-- fact_exceptions -> fact_deliveries (all exceptions must have a delivery)
+SET @CheckName = 'fact_exceptions -> fact_deliveries (DeliveryID)';
+SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions f
+WHERE NOT EXISTS (SELECT 1 FROM dw.fact_deliveries d WHERE d.DeliveryID = f.DeliveryID);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Orphaned rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
+/*=============================================================
   CHECK 6: BUSINESS METRIC SANITY
-  Validates that core financial and operational metrics are
-  within acceptable bounds after load.
-==============================================================*/
+  Core financial and operational measures must be within
+  acceptable bounds. These checks confirm that no invalid
+  values survived the clean layer and DW load.
+=============================================================*/
+
 PRINT '--- CHECK 6: BUSINESS METRIC SANITY ---';
 
-SET @CheckName = 'fact_sales — no zero or negative SalesAmount';
+-- No zero or negative SalesAmount
+SET @CheckName = 'fact_sales — SalesAmount > 0';
 SELECT @BadRows = COUNT(*) FROM dw.fact_sales WHERE SalesAmount <= 0;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_sales — no zero or negative UnitsSold';
+-- No zero or negative UnitsSold
+SET @CheckName = 'fact_sales — UnitsSold > 0';
 SELECT @BadRows = COUNT(*) FROM dw.fact_sales WHERE UnitsSold <= 0;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
-SET @CheckName = 'fact_routes — no zero or negative PlannedHours or ActualHours';
-SELECT @BadRows = COUNT(*) FROM dw.fact_routes
-WHERE PlannedHours <= 0 OR ActualHours <= 0;
+-- ResolutionTimeHours non-negative where populated
+SET @CheckName = 'fact_exceptions — ResolutionTimeHours >= 0 where not NULL';
+SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions
+WHERE ResolutionTimeHours IS NOT NULL AND ResolutionTimeHours < 0;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- PriorityFlag is 0 or 1 only
+SET @CheckName = 'fact_deliveries — PriorityFlag is 0 or 1';
+SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries WHERE PriorityFlag NOT IN (0, 1);
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
-  CHECK 7: DELIVERY DATE LOGIC
-  For non-LATE deliveries, the actual delivery date should
-  not be after the expected date. The status value in the DW
-  comes from dim_delivery_status so we join back to get the
-  string value for comparison.
-==============================================================*/
-PRINT '--- CHECK 7: DELIVERY DATE LOGIC ---';
+/*=============================================================
+  CHECK 7: ISLATE FLAG vs DELIVERY STATUS CONSISTENCY
+  IsLate is a denormalised BIT column on fact_deliveries
+  derived from DeliveryStatus in the clean layer. Both columns
+  are stored on the fact table so they can be cross-checked
+  directly without a dimension join.
 
-SET @CheckName = 'fact_deliveries — DeliveryDateKey <= ExpectedDeliveryDateKey when not LATE';
-SELECT @BadRows = COUNT(*)
-FROM dw.fact_deliveries f
-JOIN dw.dim_delivery_status ds ON f.DeliveryStatusID = ds.DeliveryStatusID
-WHERE ds.DeliveryStatus <> 'LATE'
-  AND f.DeliveryDateKey > f.ExpectedDeliveryDateKey;
+  NOTE: DeliveryStatus casing matches source data exactly --
+  'Late', 'On-Time', 'Exception' -- not 'LATE'. The original
+  v2.0 script used 'LATE' which caused every run to fail.
+=============================================================*/
+
+PRINT '--- CHECK 7: ISLATE FLAG vs DELIVERY STATUS ---';
+
+-- Late and Exception deliveries must have IsLate = 1
+SET @CheckName = 'fact_deliveries — IsLate = 1 for Late and Exception rows';
+SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries
+WHERE DeliveryStatus IN ('Late', 'Exception')
+  AND IsLate <> 1;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- On-Time deliveries must have IsLate = 0
+SET @CheckName = 'fact_deliveries — IsLate = 0 for On-Time rows';
+SELECT @BadRows = COUNT(*) FROM dw.fact_deliveries
+WHERE DeliveryStatus = 'On-Time'
+  AND IsLate <> 0;
 IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
 ELSE PRINT 'PASS: ' + @CheckName;
 
 
-/*==============================================================
-  INFORMATIONAL: TABLE ROW COUNT DISTRIBUTION
-  Not a gate check — printed for human review.
-==============================================================*/
+/*=============================================================
+  CHECK 8: ISRESOLVED FLAG vs RESOLVEDATEKEY CONSISTENCY
+  IsResolved is a denormalised BIT column on fact_exceptions.
+  ResolvedDateKey is NULL for open exceptions. Both columns
+  must be consistent with each other.
+=============================================================*/
+
+PRINT '--- CHECK 8: ISRESOLVED FLAG vs RESOLVEDATEKEY ---';
+
+-- Rows with a ResolvedDateKey must have IsResolved = 1
+SET @CheckName = 'fact_exceptions — IsResolved = 1 where ResolvedDateKey is populated';
+SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions
+WHERE ResolvedDateKey IS NOT NULL AND IsResolved <> 1;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+-- Rows with no ResolvedDateKey must have IsResolved = 0
+SET @CheckName = 'fact_exceptions — IsResolved = 0 where ResolvedDateKey is NULL';
+SELECT @BadRows = COUNT(*) FROM dw.fact_exceptions
+WHERE ResolvedDateKey IS NULL AND IsResolved <> 0;
+IF @BadRows > 0 BEGIN PRINT 'FAIL: ' + @CheckName + ' | Bad Rows = ' + CAST(@BadRows AS VARCHAR); SET @FailureCount += 1; END
+ELSE PRINT 'PASS: ' + @CheckName;
+
+
+/*=============================================================
+  INFORMATIONAL: DW TABLE ROW COUNT SUMMARY
+  Not a gate check -- printed for human review after all
+  gate checks pass. Shows actual row counts vs expected.
+
+  Expected counts:
+      dim_date           1,096    dim_driver            21
+      dim_region             7    dim_product            4
+      dim_shipment_type      3    dim_exception_type     4
+      dim_route              5    fact_deliveries    5,000
+      fact_sales         4,000    fact_exceptions    1,000
+=============================================================*/
+
 PRINT '--- INFORMATIONAL: DW TABLE ROW COUNTS ---';
 
-SELECT
-    s.name                                          AS SchemaName,
-    t.name                                          AS TableName,
-    SUM(p.rows)                                     AS RowCount
-FROM sys.tables t
-JOIN sys.schemas    s ON t.schema_id = s.schema_id
-JOIN sys.partitions p ON t.object_id = p.object_id
-                      AND p.index_id IN (0, 1)
-WHERE s.name = 'dw'
-GROUP BY s.name, t.name
-ORDER BY
-    CASE WHEN t.name LIKE 'dim%' THEN 0 ELSE 1 END,
-    t.name;
+SELECT 'dim_date'           AS TableName, COUNT(*) AS RowsCount FROM dw.dim_date
+UNION ALL
+SELECT 'dim_driver'         AS TableName, COUNT(*) AS RowsCount FROM dw.dim_driver
+UNION ALL
+SELECT 'dim_region'         AS TableName, COUNT(*) AS RowsCount FROM dw.dim_region
+UNION ALL
+SELECT 'dim_product'        AS TableName, COUNT(*) AS RowsCount FROM dw.dim_product
+UNION ALL
+SELECT 'dim_shipment_type'  AS TableName, COUNT(*) AS RowsCount FROM dw.dim_shipment_type
+UNION ALL
+SELECT 'dim_exception_type' AS TableName, COUNT(*) AS RowsCount FROM dw.dim_exception_type
+UNION ALL
+SELECT 'dim_route'          AS TableName, COUNT(*) AS RowsCount FROM dw.dim_route
+UNION ALL
+SELECT 'fact_deliveries'    AS TableName, COUNT(*) AS RowsCount FROM dw.fact_deliveries
+UNION ALL
+SELECT 'fact_sales'         AS TableName, COUNT(*) AS RowsCount FROM dw.fact_sales
+UNION ALL
+SELECT 'fact_exceptions'    AS TableName, COUNT(*) AS RowsCount FROM dw.fact_exceptions;
 
--- Fact table metric summary
+-- fact_sales summary metrics
 SELECT
-    COUNT(*)         AS TotalTransactions,
-    SUM(SalesAmount) AS TotalSales,
-    AVG(SalesAmount) AS AvgSale,
-    MIN(SalesAmount) AS MinSale,
-    MAX(SalesAmount) AS MaxSale
+    COUNT(*)                                            AS TotalTransactions,
+    SUM(SalesAmount)                                    AS TotalSales,
+    ROUND(AVG(SalesAmount), 2)                          AS AvgSale,
+    MIN(SalesAmount)                                    AS MinSale,
+    MAX(SalesAmount)                                    AS MaxSale
 FROM dw.fact_sales;
 
 
-/*==============================================================
-  FINAL GATE
-==============================================================*/
+/*=============================================================
+  FINAL PIPELINE DECISION
+  Halt the pipeline if any check failed. THROW propagates to
+  the calling SQL Agent job or orchestration layer and cancels
+  the reporting layer load.
+=============================================================*/
+
 IF @FailureCount > 0
 BEGIN
     PRINT '===== DW VALIDATION FAILED: '
-          + CAST(@FailureCount AS VARCHAR) + ' check(s) failed =====';
+        + CAST(@FailureCount AS VARCHAR)
+        + ' check(s) failed -- Reporting layer load cancelled =====';
     THROW 51002, 'DW Validation Failed. Reporting layer load cancelled.', 1;
 END
 ELSE
 BEGIN
-    PRINT '===== DW VALIDATION PASSED =====';
+    PRINT '===== DW VALIDATION PASSED — all checks passed =====';
+    PRINT 'Pipeline cleared to proceed with reporting layer load.';
 END;
+GO
