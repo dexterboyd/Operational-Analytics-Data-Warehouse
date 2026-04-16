@@ -6,9 +6,9 @@ Records row counts and timestamps into staging.load_log after
 each successful load for use by the validation script.
 
 Run Order:
-    1. etl_staging_setup_v5.sql   -- build schemas and tables
-    2. THIS SCRIPT                -- load CSV data
-    3. staging_layer_validation_v2.sql -- validate staging data
+    1. etl_staging_setup.sql   -- build schemas and tables
+    2. THIS SCRIPT             -- load CSV data
+    3. etl_staging_validation.sql -- validate staging data
 
 Usage:
     python load_staging.py
@@ -87,4 +87,4 @@ with engine.begin() as conn:
 
 print('-' * 50)
 print(f'Done -- {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-print('Run staging_layer_validation_v2.sql to validate the load.')
+print('Run 03_etl_staging_validation to validate the load.')
