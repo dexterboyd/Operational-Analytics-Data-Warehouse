@@ -263,7 +263,7 @@ WHERE NOT EXISTS (
   Purpose:
       Flag obviously out-of-range values that may indicate
       CSV parsing errors or source data issues.
-      Source data spans 2023-2025 based on CSV inspection.
+      Source data spans 2023-2026 based on CSV inspection.
 =============================================================*/
 
 PRINT '--- STEP 5: DATA RANGE SANITY ---';
@@ -274,23 +274,23 @@ FROM clean.clean_sales
 WHERE UnitsSold   <= 0
    OR SalesAmount <= 0;
 
--- Sales dates outside expected range (2023-2025)
+-- Sales dates outside expected range (2023-2026)
 SELECT COUNT(*) AS SalesOutOfRange
 FROM clean.clean_sales
 WHERE SaleDate < '2023-01-01'
-   OR SaleDate > '2025-12-31';
+   OR SaleDate > '2026-12-31';
 
--- Delivery dates outside expected range (2023-2025)
+-- Delivery dates outside expected range (2023-2026)
 SELECT COUNT(*) AS DeliveryDatesOutOfRange
 FROM clean.clean_deliveries
 WHERE DeliveryDateOnly < '2023-01-01'
-   OR DeliveryDateOnly > '2025-12-31';
+   OR DeliveryDateOnly > '2026-12-31';
 
--- Exception dates outside expected range (2023-2025)
+-- Exception dates outside expected range (2023-2026)
 SELECT COUNT(*) AS ExceptionDatesOutOfRange
 FROM clean.clean_exceptions
 WHERE DateReportedOnly < '2023-01-01'
-   OR DateReportedOnly > '2025-12-31';
+   OR DateReportedOnly > '2026-12-31';
 
 -- ResolvedDate before DateReported (chronology error)
 -- Should always be 0 -- the clean layer does not correct

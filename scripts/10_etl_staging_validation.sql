@@ -1,7 +1,7 @@
 /*=============================================================
   STAGING LAYER VALIDATION
   Database: Fedex_Ops_Database
-  Version:  3.0
+  Version:  3.1  -- Updated expected values to reflect rebuilt 2023-2026 dataset
 
   Purpose:
       Validate staging tables after each load from load_staging.py.
@@ -147,13 +147,13 @@ VALUES ('Null Check', 'staging_deliveries', 'No NULLs in required columns',
         '0', CAST(@Count AS NVARCHAR),
         CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
--- staging_deliveries: report NULL DriverID count (expected ~1,010, nullable by design)
+-- staging_deliveries: report NULL DriverID count (expected ~173, nullable by design)
 SELECT @Count = COUNT(*) FROM staging.staging_deliveries WHERE DriverID IS NULL;
 INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
 VALUES ('Null Check', 'staging_deliveries',
-        'NULL DriverID count (expected ~1010, nullable by design)',
-        '~1010', CAST(@Count AS NVARCHAR),
-        CASE WHEN @Count BETWEEN 900 AND 1100 THEN 'PASS' ELSE 'WARN' END);
+        'NULL DriverID count (expected ~173, nullable by design)',
+        '~173', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count BETWEEN 140 AND 210 THEN 'PASS' ELSE 'WARN' END);
 
 -- staging_routes: all columns NOT NULL
 SELECT @Count = COUNT(*) FROM staging.staging_routes
@@ -174,13 +174,13 @@ VALUES ('Null Check', 'staging_exceptions', 'No NULLs in required columns',
         '0', CAST(@Count AS NVARCHAR),
         CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
--- staging_exceptions: open exceptions with NULL ResolvedDate (expected ~30)
+-- staging_exceptions: open exceptions with NULL ResolvedDate (expected 0 - all resolved in source)
 SELECT @Count = COUNT(*) FROM staging.staging_exceptions WHERE ResolvedDate IS NULL;
 INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
 VALUES ('Null Check', 'staging_exceptions',
-        'Open exceptions with NULL ResolvedDate (expected ~30)',
-        '~30', CAST(@Count AS NVARCHAR),
-        CASE WHEN @Count BETWEEN 20 AND 40 THEN 'PASS' ELSE 'WARN' END);
+        'Open exceptions with NULL ResolvedDate (expected 0 - all resolved in source)',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
 
 /*=============================================================
   CATEGORY 3: DUPLICATE CHECKS
@@ -222,17 +222,16 @@ VALUES ('Duplicate Check', 'staging_exceptions', 'ExceptionID is unique',
         CASE WHEN @Count = 0 THEN 'PASS' ELSE 'FAIL' END);
 
 -- staging_routes: composite PK (RouteID + DriverID)
--- 202 duplicates are known in source CSV -- flagged as WARN
+-- Deduplicated in source - 0 duplicates expected
 SELECT @Count = COUNT(*) FROM (
     SELECT RouteID, DriverID FROM staging.staging_routes
     GROUP BY RouteID, DriverID HAVING COUNT(*) > 1
 ) d;
 INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
 VALUES ('Duplicate Check', 'staging_routes',
-        'Duplicate RouteID+DriverID combinations (202 known in source - investigate in clean layer)',
+        'Duplicate RouteID+DriverID combinations (0 expected - deduplicated in source)',
         '0', CAST(@Count AS NVARCHAR),
         CASE WHEN @Count = 0    THEN 'PASS'
-             WHEN @Count <= 202 THEN 'WARN'
              ELSE 'FAIL' END);
 
 /*=============================================================
@@ -318,20 +317,20 @@ VALUES ('Value Range', 'staging_exceptions',
 -- staging_sales: DateKey within expected range
 SELECT @Count = COUNT(*) FROM staging.staging_sales
 WHERE CAST(DateKey AS DATE) < '2023-01-01'
-   OR CAST(DateKey AS DATE) > '2025-12-31';
+   OR CAST(DateKey AS DATE) > '2026-12-31';
 INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
 VALUES ('Date Sanity', 'staging_sales',
-        'DateKey is within expected range (2023-2025)',
+        'DateKey is within expected range (2023-2026)',
         '0', CAST(@Count AS NVARCHAR),
         CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
 
 -- staging_deliveries: DeliveryDate within expected range
 SELECT @Count = COUNT(*) FROM staging.staging_deliveries
 WHERE CAST(DeliveryDate AS DATE) < '2023-01-01'
-   OR CAST(DeliveryDate AS DATE) > '2025-12-31';
+   OR CAST(DeliveryDate AS DATE) > '2026-12-31';
 INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
 VALUES ('Date Sanity', 'staging_deliveries',
-        'DeliveryDate is within expected range (2023-2025)',
+        'DeliveryDate is within expected range (2023-2026)',
         '0', CAST(@Count AS NVARCHAR),
         CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
 
@@ -396,14 +395,14 @@ VALUES ('Data Quality', 'staging_exceptions',
         '0', CAST(@Count AS NVARCHAR),
         CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
 
--- staging_routes: NULL or empty DriverID values (59 known in source)
+-- staging_routes: NULL or empty DriverID values (0 expected - NULLs replaced with 'Unassigned' in source)
 SELECT @Count = COUNT(*) FROM staging.staging_routes
 WHERE DriverID IS NULL OR DriverID = '';
 INSERT INTO #ValidationResults (Category, TableName, CheckName, Expected, Actual, Status)
 VALUES ('Data Quality', 'staging_routes',
-        'NULL or empty DriverID values (59 known in source) - fix in clean layer',
-        '~59', CAST(@Count AS NVARCHAR),
-        CASE WHEN @Count BETWEEN 50 AND 70 THEN 'WARN' ELSE 'FAIL' END);
+        'NULL or empty DriverID values (0 expected - replaced with ''Unassigned'' in source)',
+        '0', CAST(@Count AS NVARCHAR),
+        CASE WHEN @Count = 0 THEN 'PASS' ELSE 'WARN' END);
 
 GO
 

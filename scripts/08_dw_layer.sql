@@ -19,7 +19,7 @@
 
   Star Schema:
       Dimensions:
-          dw.dim_date            -- date spine 2023-2025
+          dw.dim_date            -- date spine 2023-2026
           dw.dim_driver          -- 20 drivers + Unknown
           dw.dim_region          -- 7 regions
           dw.dim_product         -- 4 product types
@@ -84,7 +84,7 @@ GO
 
 -- -----------------------------------------------------------
 -- DIMENSION: dim_date
--- Date spine covering 2023-01-01 to 2025-12-31 (1,096 rows).
+-- Date spine covering 2023-01-01 to 2026-12-31 (1,461 rows).
 -- DateKey is stored as INT in YYYYMMDD format for fast joins
 -- in Power BI and SQL reporting tools. All time intelligence
 -- attributes are pre-computed to avoid repeated derivation
@@ -295,7 +295,7 @@ GO
     UNION ALL
     SELECT DATEADD(DAY, 1, FullDate)
     FROM DateCTE
-    WHERE FullDate < '2025-12-31'
+    WHERE FullDate < '2026-12-31'
 )
 INSERT INTO dw.dim_date (
     DateKey, FullDate, DayOfWeek, DayName, DayOfMonth, DayOfYear,
@@ -327,7 +327,7 @@ SELECT
         ELSE 0
     END AS IsWeekend
 FROM DateCTE
-OPTION (MAXRECURSION 1096);
+OPTION (MAXRECURSION 1461);
 
 PRINT 'Populated: dw.dim_date (' + CAST(@@ROWCOUNT AS NVARCHAR) + ' rows)';
 GO
@@ -568,16 +568,16 @@ GO
   match clean layer row counts exactly.
 
   Expected:
-      dim_date           1,096 rows  (2023-01-01 to 2025-12-31)
+      dim_date           1,461 rows  (2023-01-01 to 2026-12-31)
       dim_driver            21 rows  (20 named + 1 Unknown)
       dim_region             7 rows
       dim_product            4 rows
       dim_shipment_type      3 rows
       dim_exception_type     4 rows
       dim_route              5 rows
-      fact_deliveries    5,000 rows
-      fact_sales         4,000 rows
-      fact_exceptions    1,000 rows
+      fact_deliveries    5,620 rows
+      fact_sales         4,550 rows
+      fact_exceptions    1,010 rows
 =============================================================*/
 
 PRINT '--- DW ROW COUNT VERIFICATION ---';

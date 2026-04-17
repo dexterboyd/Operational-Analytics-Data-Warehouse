@@ -127,7 +127,7 @@ IF OBJECT_ID('staging.staging_routes', 'U') IS NULL
 BEGIN
     CREATE TABLE staging.staging_routes (
         RouteID      NVARCHAR(10) NOT NULL,
-        DriverID     NVARCHAR(50) NULL,
+        DriverID     NVARCHAR(50) NOT NULL,
         PlannedStops INT          NOT NULL,
         ActualStops  INT          NOT NULL,
         PlannedHours DECIMAL(5,2) NOT NULL,
