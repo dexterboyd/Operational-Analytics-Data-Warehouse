@@ -1,8 +1,9 @@
 # Express Operations Data Warehouse
 ### Star Schema Design, ETL Pipeline & Operational Analytics in SQL Server
 
-**Author:** Dexter Boyd 
-**Version:** 2.0 · **Database:** SQL Server 2022 16.0
+**Author:** Dexter Boyd
+**Version:** 2.0
+**Database:** SQL Server 2022 16.0
 ---
 
 ## Project Overview
