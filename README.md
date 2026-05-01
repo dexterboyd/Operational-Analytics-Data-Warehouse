@@ -1,19 +1,16 @@
-# FedEx Operations Data Warehouse
+# Express Operations Data Warehouse
 ### Star Schema Design, ETL Pipeline & Operational Analytics in SQL Server
 
-**Author:** Dexter Boyd · [LinkedIn](www.linkedin.com/in/dexter-boyd)  
-**Version:** 2.0 · **Database:** SQL Server 2019 (Compatibility Level 150)
-
+**Author:** Dexter Boyd 
+**Version:** 2.0 · **Database:** SQL Server 2022 16.0
 ---
 
 ## Project Overview
 
 This project demonstrates the design and implementation of a production-grade dimensional data warehouse for delivery operations, sales performance, route efficiency, and exception management reporting.
+The solution follows **Kimball-style dimensional modeling** using a star schema design with a validated and layered ETL pipeline. Each pipeline layer has a hard validation gate where no layer loads unless the preceding gate passes.
 
-The solution follows **Kimball-style dimensional modeling** principles using a star schema design with a fully validated, layered ETL pipeline. Each pipeline layer has a hard validation gate — no layer loads unless the preceding gate passes.
-
-The warehouse enables analysis of:
-
+Data Warehouse analysis:
 - Sales performance by region, product type, and time period
 - Delivery on-time performance vs planned route metrics
 - Exception trends, types, and resolution times
@@ -22,9 +19,9 @@ The warehouse enables analysis of:
 
 ---
 
-## Architecture
+## Architecture:
 
-The pipeline follows a strict 4-layer linear flow:
+The pipeline follows a 4-layer linear flow:
 
 ```
 Raw CSV Files (sales, deliveries, routes, exceptions)
@@ -55,22 +52,20 @@ DW Layer  (dw schema — single transaction, ROLLBACK on failure)
         │
         │  GATE — 09_dw_validation.sql
         │  THROW on: empty tables, row count drops, NULL surrogate
-        │  keys, duplicate PKs, FK orphans, metric sanity
+        │  keys, duplicate PKs, FK orphans, metrics sanity
         ▼
-Reporting Layer  (reporting schema — SQL views, no stored data)
+Reporting Layer  (reporting schema — SQL views)
         │
         ▼
 Power BI Dashboards
-        (all aggregations and measures defined in Power BI, not SQL)
+        (all aggregations and measures defined in Power BI)
 ```
-
----
 
 ## Star Schema Design
 
 ### Dimension Tables
 
-All dimensions use **surrogate keys** (IDENTITY) for referential integrity, decoupling source system codes from analytics.
+All dimensions use **surrogate keys** for referential integrity to decouple source system code from analytics.
 
 | Dimension Table | Surrogate Key | Source |
 |---|---|---|
@@ -84,8 +79,6 @@ All dimensions use **surrogate keys** (IDENTITY) for referential integrity, deco
 | `dim_exception_type` | ExceptionTypeSK | ExceptionType from staging_exceptions |
 | `dim_priority_flag` | PriorityFlagSK | PriorityFlag from deliveries + exceptions |
 
-> `dim_driver` includes an `IsUnknown` flag and a dedicated `Unknown` row to handle the ~1,010 NULL DriverID values in the source data without dropping records.
-
 ### Fact Tables
 
 | Fact Table | Grain | Key Measures |
@@ -95,13 +88,13 @@ All dimensions use **surrogate keys** (IDENTITY) for referential integrity, deco
 | `fact_routes` | One row per route run | PlannedStops, ActualStops, PlannedHours, ActualHours, StopVariance, EfficiencyRatio |
 | `fact_exceptions` | One row per exception | ResolutionTimeHours, ResolutionDays, IsResolved, IsDateCorrected |
 
-> `fact_deliveries` uses two separate date keys — `DeliveryDateKey` and `ExpectedDeliveryDateKey` — to support late delivery analysis by expected date. All fact tables have explicit PRIMARY KEY constraints.
+> `fact_deliveries` uses two separate date keys — `DeliveryDateKey` and `ExpectedDeliveryDateKey` — to support late delivery analysis by expected date.
 
 ---
 
-## Script Inventory
+## Script Inventory:
 
-All scripts are numbered for unambiguous execution order.
+Scripts are numbered for execution order.
 
 | # | Script | Type | Description |
 |---|---|---|---|
@@ -122,30 +115,28 @@ All scripts are numbered for unambiguous execution order.
 
 ---
 
-## ETL Pipeline Detail
+## ETL Pipeline:
 
 ### Staging Layer
-Raw CSV data is loaded via `03_load_staging.py` using **pandas + SQLAlchemy** with `fast_executemany=True`. Each run truncates staging tables before load to prevent duplicates. All loads execute within a single transaction — any failure triggers a full rollback and no tables are partially loaded. Load row counts are recorded in `staging.load_log` for downstream validation.
+Raw CSV data is loaded via `03_load_staging.py` using **pandas + SQLAlchemy**. Each run truncates staging tables before load to prevent duplicates. All loads execute within a single transaction. Any failure triggers a full rollback and no tables are loaded.
 
 ### Clean Layer
-The clean layer is entirely **view-based** — no data is copied or stored. Views apply:
+The clean layer is **view-based** where no data is copied or stored.
 - Truncated value expansion (e.g. `'L.'` → `'Large Package'`)
 - NULL handling (`DriverID` NULL → `'Unknown'`)
 - Derived business flags (`IsLate`, `IsResolved`, `IsBadDateKey`, `IsDateCorrected`)
 - Derived metrics (`DaysVariance`, `StopVariance`, `HourVariance`, `EfficiencyRatio`, `RevenuePerUnit`)
 - Time dimension extraction (`Year`, `Month`, `Quarter` from date columns)
 
-### DW Layer
+### Data Warehouse Layer
 The full DW load executes in a **single transaction**. Dimensions are loaded before facts. Surrogate keys are resolved via joins at load time. If any step fails, the entire transaction rolls back, leaving the DW in a consistent state.
 
 ### Reporting Layer
-Reporting views are flat, one-row-per-fact-row SQL views with no `GROUP BY` or aggregations. All analytical measures are defined in Power BI, not in SQL, to maintain a single source of truth for business logic.
+Reporting views are flat SQL views with no aggregations. All analytical measures are defined in Power BI to maintain a single source for business logic.
 
 ---
 
-## Validation Strategy
-
-Three hard pipeline gates use `THROW` (not `RAISERROR`) so failures are fatal and execution halts immediately.
+## Validation Strategy:
 
 ### Gate 1 — Staging (`10_etl_staging_validation.sql`)
 Catches empty tables, NULL primary keys, negative metric values, referential integrity violations, and date range/chronology errors before the clean layer is built.
@@ -156,7 +147,7 @@ Catches empty tables, NULL primary keys, negative metric values, referential int
 ### Gate 3 — DW (`09_dw_validation.sql`)
 Validates post-load DW state: empty table guard, row count comparison vs clean views, NULL surrogate keys, duplicate PK detection, FK orphan checks across all fact-to-dimension relationships, business metric sanity, and delivery date logic.
 
-### Informational Scripts (non-blocking)
+### Informational Scripts:
 | Script | When to Run |
 |---|---|
 | `05_clean_layer_data_profiling.sql` | After clean views created; review before DW load |
@@ -166,8 +157,7 @@ Validates post-load DW state: empty table guard, row count comparison vs clean v
 
 ---
 
-## Business Questions Answered
-
+## Business Questions:
 - What is total sales revenue by region, product type, and month?
 - Which routes are meeting planned vs actual stop and hour targets?
 - Which exception types have the longest resolution times?
@@ -177,7 +167,7 @@ Validates post-load DW state: empty table guard, row count comparison vs clean v
 
 ---
 
-## Technologies Used
+## Technologies:
 
 | Category | Tools |
 |---|---|
@@ -189,8 +179,7 @@ Validates post-load DW state: empty table guard, row count comparison vs clean v
 
 ---
 
-## Key Concepts Demonstrated
-
+## Key Concepts:
 - Kimball-style dimensional modeling with surrogate key implementation
 - Multi-layer ETL pipeline with hard validation gates at each boundary
 - View-based clean layer for zero-copy transformation
@@ -201,21 +190,4 @@ Validates post-load DW state: empty table guard, row count comparison vs clean v
 
 ---
 
-## v2.0 Schema Changes
-
-| Change | Reason |
-|---|---|
-| `staging_routes` composite PK `(RouteID, DriverID)` | Prevented silent duplicate route+driver rows causing double-counting |
-| `ResolutionTimeHours` changed from `INT` to `DECIMAL(6,2)` | Fractional hours were silently truncated |
-| `fact_deliveries` split into `DeliveryDateKey` + `ExpectedDeliveryDateKey` | Single date key made late-delivery analysis by expected date impossible |
-| `IsDateCorrected` flag added to `fact_exceptions` | Clean layer was silently correcting out-of-order dates with no audit trail |
-| `EfficiencyRatio` and `StopVariance` derived at clean layer | Avoided recomputation in every downstream consumer |
-| All fact tables given explicit PRIMARY KEY constraints | Without PKs, duplicate rows could load silently |
-| All gates use `THROW` not `RAISERROR` severity 10 | Severity 10 is informational — pipeline previously continued through failures |
-| Empty-table guard added as first check in all gates | Without it, a silent empty load causes all downstream checks to pass vacuously |
-| Full DW load wrapped in single transaction | Partial failure previously left DW in inconsistent mixed state |
-| `TotalRevenue = UnitsSold * SalesAmount` removed from reporting views | SalesAmount is already the transaction total; multiplication double-counted revenue |
-
----
-
-*Update this README whenever tables, views, business rules, or script filenames change. Treat column renames as breaking changes and update all affected layers simultaneously.*
+*Update this README whenever tables, views, business rules, or script filenames change.
